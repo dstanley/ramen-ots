@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ramen-ots-controller
+  namespace: ramen-ots-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ramen-ots-controller
+rules:
+  # ManifestWork - full access for reconciliation
+  - apiGroups: ["work.open-cluster-management.io"]
+    resources: ["manifestworks"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["work.open-cluster-management.io"]
+    resources: ["manifestworks/status"]
+    verbs: ["get", "update", "patch"]
+  # ManagedClusterView - full access for reconciliation
+  - apiGroups: ["view.open-cluster-management.io"]
+    resources: ["managedclusterviews"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["view.open-cluster-management.io"]
+    resources: ["managedclusterviews/status"]
+    verbs: ["get", "update", "patch"]
+  # Secrets - read kubeconfig secrets
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  # Events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Coordination for leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ramen-ots-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ramen-ots-controller
+subjects:
+  - kind: ServiceAccount
+    name: ramen-ots-controller
+    namespace: ramen-ots-system
