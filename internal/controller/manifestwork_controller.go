@@ -22,8 +22,10 @@ import (
 )
 
 const (
-	manifestWorkFinalizer = "ramen-ots.ramendr.openshift.io/manifestwork-cleanup"
-	fieldManager          = "ramen-ots"
+	manifestWorkFinalizer       = "ramen-ots.ramendr.openshift.io/manifestwork-cleanup"
+	ocmManifestWorkFinalizer    = "cluster.open-cluster-management.io/manifest-work-cleanup"
+	legacyManifestWorkFinalizer = "rancher-ots.ramendr.openshift.io/manifestwork-cleanup"
+	fieldManager                = "ramen-ots"
 )
 
 // ManifestWorkReconciler fulfills ManifestWork CRs by applying their embedded
@@ -49,12 +51,23 @@ func (r *ManifestWorkReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Handle deletion
 	if !mw.DeletionTimestamp.IsZero() {
+		needsUpdate := false
 		if ctrlutil.ContainsFinalizer(mw, manifestWorkFinalizer) {
 			if err := r.deleteManifests(ctx, log, clusterName, mw); err != nil {
 				log.Error(err, "Failed to delete manifests from managed cluster")
 				// Continue to remove finalizer — best effort cleanup
 			}
 			ctrlutil.RemoveFinalizer(mw, manifestWorkFinalizer)
+			needsUpdate = true
+		}
+		// Also remove stale finalizers from OCM and legacy controller
+		for _, f := range []string{ocmManifestWorkFinalizer, legacyManifestWorkFinalizer} {
+			if ctrlutil.ContainsFinalizer(mw, f) {
+				ctrlutil.RemoveFinalizer(mw, f)
+				needsUpdate = true
+			}
+		}
+		if needsUpdate {
 			if err := r.Update(ctx, mw); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -62,9 +75,19 @@ func (r *ManifestWorkReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// Add finalizer
+	// Add our finalizer and remove any stale OCM finalizer
+	needsFinalizerUpdate := false
 	if !ctrlutil.ContainsFinalizer(mw, manifestWorkFinalizer) {
 		ctrlutil.AddFinalizer(mw, manifestWorkFinalizer)
+		needsFinalizerUpdate = true
+	}
+	for _, f := range []string{ocmManifestWorkFinalizer, legacyManifestWorkFinalizer} {
+		if ctrlutil.ContainsFinalizer(mw, f) {
+			ctrlutil.RemoveFinalizer(mw, f)
+			needsFinalizerUpdate = true
+		}
+	}
+	if needsFinalizerUpdate {
 		if err := r.Update(ctx, mw); err != nil {
 			return ctrl.Result{}, err
 		}
