@@ -83,6 +83,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register Secret Propagator controller
+	if err := setupSecretPropagatorController(mgr, log); err != nil {
+		log.Error(err, "unable to create Secret Propagator controller")
+		os.Exit(1)
+	}
+
 	// Health checks
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		log.Error(err, "unable to set up health check")
@@ -118,6 +124,14 @@ func setupMCVController(mgr ctrl.Manager, registry *cluster.Registry, log logr.L
 		Client:   mgr.GetClient(),
 		Log:      log.WithName("managedclusterview"),
 		Registry: registry,
+	}
+	return reconciler.SetupWithManager(mgr)
+}
+
+func setupSecretPropagatorController(mgr ctrl.Manager, log logr.Logger) error {
+	reconciler := &controller.SecretPropagatorReconciler{
+		Client: mgr.GetClient(),
+		Log:    log.WithName("secretpropagator"),
 	}
 	return reconciler.SetupWithManager(mgr)
 }

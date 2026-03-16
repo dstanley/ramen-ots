@@ -12,7 +12,7 @@ rules:
   # ManifestWork - full access for reconciliation
   - apiGroups: ["work.open-cluster-management.io"]
     resources: ["manifestworks"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["work.open-cluster-management.io"]
     resources: ["manifestworks/status"]
     verbs: ["get", "update", "patch"]
@@ -23,9 +23,13 @@ rules:
   - apiGroups: ["view.open-cluster-management.io"]
     resources: ["managedclusterviews/status"]
     verbs: ["get", "update", "patch"]
-  # Secrets - read kubeconfig secrets
+  # Secrets - read kubeconfig secrets, update for finalizers on hub secrets
   - apiGroups: [""]
     resources: ["secrets"]
+    verbs: ["get", "list", "watch", "update"]
+  # DRPolicy - read target clusters for secret propagation
+  - apiGroups: ["ramendr.openshift.io"]
+    resources: ["drpolicies"]
     verbs: ["get", "list", "watch"]
   # Events
   - apiGroups: [""]
