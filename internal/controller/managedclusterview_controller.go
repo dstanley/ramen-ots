@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -15,7 +16,6 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
@@ -24,15 +24,23 @@ import (
 )
 
 const (
-	defaultRequeueInterval = 10 * time.Second
+	defaultMCVRequeueInterval = 15 * time.Second
 )
 
 // ManagedClusterViewReconciler fulfills ManagedClusterView CRs by reading
 // the specified resource from managed clusters via direct kubeconfig access.
 type ManagedClusterViewReconciler struct {
 	client.Client
-	Log      logr.Logger
-	Registry *cluster.Registry
+	Log             logr.Logger
+	Registry        *cluster.Registry
+	RequeueInterval time.Duration
+}
+
+func (r *ManagedClusterViewReconciler) requeueInterval() time.Duration {
+	if r.RequeueInterval > 0 {
+		return r.RequeueInterval
+	}
+	return defaultMCVRequeueInterval
 }
 
 func (r *ManagedClusterViewReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -67,8 +75,8 @@ func (r *ManagedClusterViewReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Get managed cluster client
 	dc, err := r.Registry.GetDynamicClient(clusterName)
 	if err != nil {
-		return r.updateMCVStatus(ctx, mcvUnst,
-			fmt.Errorf("getting client for cluster %s: %w", clusterName, err))
+		return r.updateMCVStatusIfChanged(ctx, log, mcvUnst,
+			fmt.Errorf("getting client for cluster %s: %w", clusterName, err), nil)
 	}
 
 	// Build GVR from scope — use Resource field if set, otherwise derive from Kind
@@ -95,18 +103,32 @@ func (r *ManagedClusterViewReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	if err != nil {
-		return r.updateMCVStatus(ctx, mcvUnst, err)
+		return r.updateMCVStatusIfChanged(ctx, log, mcvUnst, err, nil)
 	}
 
-	// Success — update MCV status with the resource data
-	return r.updateMCVStatusSuccess(ctx, mcvUnst, result)
+	// Success — update MCV status with the resource data (only if changed)
+	return r.updateMCVStatusIfChanged(ctx, log, mcvUnst, nil, result)
 }
 
-func (r *ManagedClusterViewReconciler) updateMCVStatus(
-	ctx context.Context, mcv *unstructured.Unstructured, fetchErr error,
+// updateMCVStatusIfChanged compares the fetched result with the existing MCV status
+// and only writes an update when the condition or result data actually changed.
+func (r *ManagedClusterViewReconciler) updateMCVStatusIfChanged(
+	ctx context.Context, log logr.Logger, mcv *unstructured.Unstructured,
+	fetchErr error, result *unstructured.Unstructured,
 ) (ctrl.Result, error) {
-	now := metav1.Now().Format(time.RFC3339)
+	requeue := ctrl.Result{RequeueAfter: r.requeueInterval()}
 
+	if fetchErr != nil {
+		return r.handleFetchError(ctx, log, mcv, fetchErr, requeue)
+	}
+
+	return r.handleFetchSuccess(ctx, log, mcv, result, requeue)
+}
+
+func (r *ManagedClusterViewReconciler) handleFetchError(
+	ctx context.Context, log logr.Logger, mcv *unstructured.Unstructured,
+	fetchErr error, requeue ctrl.Result,
+) (ctrl.Result, error) {
 	reason := ReasonGetResourceFailed
 	message := fetchErr.Error()
 
@@ -115,6 +137,18 @@ func (r *ManagedClusterViewReconciler) updateMCVStatus(
 		message = fmt.Sprintf("err: resource %s not found", message)
 	}
 
+	// Check if condition already reflects this error state
+	existingConditions, _, _ := unstructured.NestedSlice(mcv.Object, "status", "conditions")
+	if len(existingConditions) > 0 {
+		if ec, ok := existingConditions[0].(map[string]interface{}); ok {
+			if ec["status"] == string(metav1.ConditionFalse) && ec["reason"] == reason {
+				// Already in error state, skip update
+				return requeue, nil
+			}
+		}
+	}
+
+	now := metav1.Now().Format(time.RFC3339)
 	conditions := []interface{}{
 		map[string]interface{}{
 			"type":               ConditionViewProcessing,
@@ -136,14 +170,43 @@ func (r *ManagedClusterViewReconciler) updateMCVStatus(
 		return ctrl.Result{}, fmt.Errorf("updating MCV status: %w", err)
 	}
 
-	return ctrl.Result{RequeueAfter: defaultRequeueInterval}, nil
+	return requeue, nil
 }
 
-func (r *ManagedClusterViewReconciler) updateMCVStatusSuccess(
-	ctx context.Context, mcv *unstructured.Unstructured, result *unstructured.Unstructured,
+func (r *ManagedClusterViewReconciler) handleFetchSuccess(
+	ctx context.Context, log logr.Logger, mcv *unstructured.Unstructured,
+	result *unstructured.Unstructured, requeue ctrl.Result,
 ) (ctrl.Result, error) {
-	now := metav1.Now().Format(time.RFC3339)
+	resultJSON, err := json.Marshal(result.Object)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("marshaling result: %w", err)
+	}
 
+	var rawResult map[string]interface{}
+	if err := json.Unmarshal(resultJSON, &rawResult); err != nil {
+		return ctrl.Result{}, fmt.Errorf("unmarshaling result for status: %w", err)
+	}
+
+	// Compare with existing result — skip update if unchanged
+	existingResult, _, _ := unstructured.NestedMap(mcv.Object, "status", "result")
+	existingConditions, _, _ := unstructured.NestedSlice(mcv.Object, "status", "conditions")
+
+	alreadySuccess := false
+	if len(existingConditions) > 0 {
+		if ec, ok := existingConditions[0].(map[string]interface{}); ok {
+			alreadySuccess = ec["status"] == string(metav1.ConditionTrue) &&
+				ec["reason"] == ReasonGetResource
+		}
+	}
+
+	if alreadySuccess && reflect.DeepEqual(existingResult, rawResult) {
+		// Nothing changed — skip the status write
+		return requeue, nil
+	}
+
+	log.V(1).Info("MCV result changed, updating status", "mcv", mcv.GetName())
+
+	now := metav1.Now().Format(time.RFC3339)
 	conditions := []interface{}{
 		map[string]interface{}{
 			"type":               ConditionViewProcessing,
@@ -158,24 +221,6 @@ func (r *ManagedClusterViewReconciler) updateMCVStatusSuccess(
 		return ctrl.Result{}, fmt.Errorf("setting MCV conditions: %w", err)
 	}
 
-	// Set the result with the raw resource data
-	resultJSON, err := json.Marshal(result.Object)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("marshaling result: %w", err)
-	}
-
-	resultMap := map[string]interface{}{
-		"raw": runtime.RawExtension{Raw: resultJSON},
-	}
-
-	// For the MCV status.result, we need to set the raw JSON directly
-	// The OCM MCV status.result is a RawExtension at the top level
-	var rawResult map[string]interface{}
-	if err := json.Unmarshal(resultJSON, &rawResult); err != nil {
-		return ctrl.Result{}, fmt.Errorf("unmarshaling result for status: %w", err)
-	}
-
-	_ = resultMap // not used directly; we set the result as the raw object
 	if err := unstructured.SetNestedField(mcv.Object, rawResult, "status", "result"); err != nil {
 		return ctrl.Result{}, fmt.Errorf("setting MCV result: %w", err)
 	}
@@ -184,7 +229,7 @@ func (r *ManagedClusterViewReconciler) updateMCVStatusSuccess(
 		return ctrl.Result{}, fmt.Errorf("updating MCV status: %w", err)
 	}
 
-	return ctrl.Result{RequeueAfter: defaultRequeueInterval}, nil
+	return requeue, nil
 }
 
 func (r *ManagedClusterViewReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -204,38 +249,38 @@ func pluralizeKind(kind string) string {
 	// Explicit mappings for kinds that don't follow simple lowering + "s"
 	known := map[string]string{
 		// Kubernetes built-ins
-		"Namespace":                  "namespaces",
-		"Ingress":                    "ingresses",
-		"NetworkPolicy":              "networkpolicies",
-		"StorageClass":               "storageclasses",
-		"RuntimeClass":               "runtimeclasses",
-		"IngressClass":               "ingressclasses",
-		"PriorityClass":              "priorityclasses",
+		"Namespace":                "namespaces",
+		"Ingress":                  "ingresses",
+		"NetworkPolicy":            "networkpolicies",
+		"StorageClass":             "storageclasses",
+		"RuntimeClass":             "runtimeclasses",
+		"IngressClass":             "ingressclasses",
+		"PriorityClass":            "priorityclasses",
 		// Kubernetes resources commonly in ManifestWorks
-		"ClusterRole":                "clusterroles",
-		"ClusterRoleBinding":         "clusterrolebindings",
-		"Role":                       "roles",
-		"RoleBinding":                "rolebindings",
-		"ServiceAccount":             "serviceaccounts",
-		"ConfigMap":                  "configmaps",
-		"Secret":                     "secrets",
-		"Service":                    "services",
-		"Deployment":                 "deployments",
-		"DaemonSet":                  "daemonsets",
-		"StatefulSet":                "statefulsets",
-		"PersistentVolumeClaim":      "persistentvolumeclaims",
-		"PersistentVolume":           "persistentvolumes",
-		"CustomResourceDefinition":   "customresourcedefinitions",
+		"ClusterRole":              "clusterroles",
+		"ClusterRoleBinding":       "clusterrolebindings",
+		"Role":                     "roles",
+		"RoleBinding":              "rolebindings",
+		"ServiceAccount":           "serviceaccounts",
+		"ConfigMap":                "configmaps",
+		"Secret":                   "secrets",
+		"Service":                  "services",
+		"Deployment":               "deployments",
+		"DaemonSet":                "daemonsets",
+		"StatefulSet":              "statefulsets",
+		"PersistentVolumeClaim":    "persistentvolumeclaims",
+		"PersistentVolume":         "persistentvolumes",
+		"CustomResourceDefinition": "customresourcedefinitions",
 		// CSI / storage
-		"VolumeSnapshotClass":           "volumesnapshotclasses",
-		"VolumeReplicationClass":        "volumereplicationclasses",
-		"VolumeGroupSnapshotClass":      "volumegroupsnapshotclasses",
-		"VolumeGroupReplicationClass":   "volumegroupreplicationclasses",
+		"VolumeSnapshotClass":         "volumesnapshotclasses",
+		"VolumeReplicationClass":      "volumereplicationclasses",
+		"VolumeGroupSnapshotClass":    "volumegroupsnapshotclasses",
+		"VolumeGroupReplicationClass": "volumegroupreplicationclasses",
 		// Ramen types
-		"VolumeReplicationGroup":     "volumereplicationgroups",
-		"DRClusterConfig":            "drclusterconfigs",
-		"NetworkFence":               "networkfences",
-		"MaintenanceMode":            "maintenancemodes",
+		"VolumeReplicationGroup": "volumereplicationgroups",
+		"DRClusterConfig":        "drclusterconfigs",
+		"NetworkFence":           "networkfences",
+		"MaintenanceMode":        "maintenancemodes",
 	}
 
 	if plural, ok := known[kind]; ok {

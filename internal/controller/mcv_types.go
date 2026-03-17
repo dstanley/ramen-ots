@@ -7,12 +7,18 @@
 package controller
 
 import (
+	"time"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 const (
+	// defaultRequeueInterval is the shared requeue interval for controllers
+	// that need periodic retry (ManifestWork on error, SecretPropagator).
+	defaultRequeueInterval = 30 * time.Second
+
 	// ConditionViewProcessing is the condition type for MCV status
 	ConditionViewProcessing = "Processing"
 	// ReasonGetResourceFailed indicates the resource could not be retrieved

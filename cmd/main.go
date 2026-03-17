@@ -6,6 +6,7 @@ package main
 import (
 	"flag"
 	"os"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/ramendr/ramen-ots/internal/cluster"
@@ -35,6 +36,7 @@ func main() {
 		healthProbeAddr      string
 		secretNamespace      string
 		fallbackKubeconfig   string
+		mcvRequeueInterval   time.Duration
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
@@ -45,6 +47,8 @@ func main() {
 		"Namespace where kubeconfig Secrets for managed clusters are stored.")
 	flag.StringVar(&fallbackKubeconfig, "fallback-kubeconfig", "",
 		"Path to a kubeconfig file with contexts matching cluster names (dev/testing).")
+	flag.DurationVar(&mcvRequeueInterval, "mcv-requeue-interval", 15*time.Second,
+		"Requeue interval for ManagedClusterView polling.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -78,7 +82,7 @@ func main() {
 	}
 
 	// Register ManagedClusterView controller
-	if err := setupMCVController(mgr, registry, log); err != nil {
+	if err := setupMCVController(mgr, registry, log, mcvRequeueInterval); err != nil {
 		log.Error(err, "unable to create ManagedClusterView controller")
 		os.Exit(1)
 	}
@@ -119,11 +123,12 @@ func setupManifestWorkController(mgr ctrl.Manager, registry *cluster.Registry, l
 	return reconciler.SetupWithManager(mgr)
 }
 
-func setupMCVController(mgr ctrl.Manager, registry *cluster.Registry, log logr.Logger) error {
+func setupMCVController(mgr ctrl.Manager, registry *cluster.Registry, log logr.Logger, requeueInterval time.Duration) error {
 	reconciler := &controller.ManagedClusterViewReconciler{
-		Client:   mgr.GetClient(),
-		Log:      log.WithName("managedclusterview"),
-		Registry: registry,
+		Client:          mgr.GetClient(),
+		Log:             log.WithName("managedclusterview"),
+		Registry:        registry,
+		RequeueInterval: requeueInterval,
 	}
 	return reconciler.SetupWithManager(mgr)
 }

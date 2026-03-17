@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 
@@ -26,6 +27,7 @@ const (
 	ocmManifestWorkFinalizer    = "cluster.open-cluster-management.io/manifest-work-cleanup"
 	legacyManifestWorkFinalizer = "rancher-ots.ramendr.openshift.io/manifestwork-cleanup"
 	fieldManager                = "ramen-ots"
+	manifestHashAnnotation      = "ramen-ots.io/manifest-hash"
 )
 
 // ManifestWorkReconciler fulfills ManifestWork CRs by applying their embedded
@@ -93,11 +95,33 @@ func (r *ManifestWorkReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// Apply manifests to managed cluster
-	applyErr := r.applyManifests(ctx, log, clusterName, mw)
+	// Compute hash of manifests to detect changes
+	currentHash := computeManifestHash(mw)
+	lastHash := ""
+	if mw.Annotations != nil {
+		lastHash = mw.Annotations[manifestHashAnnotation]
+	}
 
-	// Update status conditions
-	if err := r.updateStatus(ctx, mw, applyErr); err != nil {
+	// Only apply if manifests have changed
+	var applyErr error
+	if currentHash != lastHash {
+		log.Info("Manifest spec changed, applying to cluster", "cluster", clusterName)
+		applyErr = r.applyManifests(ctx, log, clusterName, mw)
+
+		if applyErr == nil {
+			// Store the hash so we skip next time if unchanged
+			if mw.Annotations == nil {
+				mw.Annotations = map[string]string{}
+			}
+			mw.Annotations[manifestHashAnnotation] = currentHash
+			if err := r.Update(ctx, mw); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
+	// Update status conditions only if they actually changed
+	if err := r.updateStatusIfChanged(ctx, mw, applyErr); err != nil {
 		log.Error(err, "Failed to update ManifestWork status")
 		return ctrl.Result{}, err
 	}
@@ -108,6 +132,16 @@ func (r *ManifestWorkReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// computeManifestHash returns a hex-encoded SHA256 hash of the ManifestWork's
+// manifest payloads, used to detect spec changes and skip redundant applies.
+func computeManifestHash(mw *ocmworkv1.ManifestWork) string {
+	h := sha256.New()
+	for _, m := range mw.Spec.Workload.Manifests {
+		h.Write(m.Raw)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func (r *ManifestWorkReconciler) applyManifests(
@@ -206,62 +240,63 @@ func (r *ManifestWorkReconciler) deleteManifests(
 	return nil
 }
 
-func (r *ManifestWorkReconciler) updateStatus(
+// updateStatusIfChanged only writes status when conditions actually differ from
+// what is already on the ManifestWork, avoiding timestamp churn and unnecessary
+// watch events.
+func (r *ManifestWorkReconciler) updateStatusIfChanged(
 	ctx context.Context, mw *ocmworkv1.ManifestWork, applyErr error,
 ) error {
-	now := metav1.Now()
+	desired := desiredConditions(applyErr)
 
-	if applyErr != nil {
-		mw.Status.Conditions = []metav1.Condition{
-			{
-				Type:               ocmworkv1.WorkApplied,
-				Status:             metav1.ConditionFalse,
-				LastTransitionTime: now,
-				Reason:             "ApplyFailed",
-				Message:            applyErr.Error(),
-			},
-			{
-				Type:               ocmworkv1.WorkAvailable,
-				Status:             metav1.ConditionFalse,
-				LastTransitionTime: now,
-				Reason:             "ApplyFailed",
-				Message:            applyErr.Error(),
-			},
-			{
-				Type:               ocmworkv1.WorkDegraded,
-				Status:             metav1.ConditionTrue,
-				LastTransitionTime: now,
-				Reason:             "ApplyFailed",
-				Message:            applyErr.Error(),
-			},
-		}
-	} else {
-		mw.Status.Conditions = []metav1.Condition{
-			{
-				Type:               ocmworkv1.WorkApplied,
-				Status:             metav1.ConditionTrue,
-				LastTransitionTime: now,
-				Reason:             "AppliedSuccessfully",
-				Message:            "All manifests applied successfully",
-			},
-			{
-				Type:               ocmworkv1.WorkAvailable,
-				Status:             metav1.ConditionTrue,
-				LastTransitionTime: now,
-				Reason:             "ResourcesAvailable",
-				Message:            "All resources are available",
-			},
-			{
-				Type:               ocmworkv1.WorkDegraded,
-				Status:             metav1.ConditionFalse,
-				LastTransitionTime: now,
-				Reason:             "NotDegraded",
-				Message:            "Resources are healthy",
-			},
-		}
+	// Check if conditions already match
+	if conditionsMatch(mw.Status.Conditions, desired) {
+		return nil
 	}
 
+	now := metav1.Now()
+	for i := range desired {
+		desired[i].LastTransitionTime = now
+	}
+	mw.Status.Conditions = desired
+
 	return r.Status().Update(ctx, mw)
+}
+
+// desiredConditions returns the target conditions for the given apply result,
+// without timestamps (those are set only when we actually write).
+func desiredConditions(applyErr error) []metav1.Condition {
+	if applyErr != nil {
+		msg := applyErr.Error()
+		return []metav1.Condition{
+			{Type: ocmworkv1.WorkApplied, Status: metav1.ConditionFalse, Reason: "ApplyFailed", Message: msg},
+			{Type: ocmworkv1.WorkAvailable, Status: metav1.ConditionFalse, Reason: "ApplyFailed", Message: msg},
+			{Type: ocmworkv1.WorkDegraded, Status: metav1.ConditionTrue, Reason: "ApplyFailed", Message: msg},
+		}
+	}
+	return []metav1.Condition{
+		{Type: ocmworkv1.WorkApplied, Status: metav1.ConditionTrue, Reason: "AppliedSuccessfully", Message: "All manifests applied successfully"},
+		{Type: ocmworkv1.WorkAvailable, Status: metav1.ConditionTrue, Reason: "ResourcesAvailable", Message: "All resources are available"},
+		{Type: ocmworkv1.WorkDegraded, Status: metav1.ConditionFalse, Reason: "NotDegraded", Message: "Resources are healthy"},
+	}
+}
+
+// conditionsMatch returns true if the existing conditions have the same
+// Status and Reason as the desired conditions (ignoring timestamps and messages).
+func conditionsMatch(existing, desired []metav1.Condition) bool {
+	if len(existing) != len(desired) {
+		return false
+	}
+	lookup := map[string]metav1.Condition{}
+	for _, c := range existing {
+		lookup[c.Type] = c
+	}
+	for _, d := range desired {
+		e, ok := lookup[d.Type]
+		if !ok || e.Status != d.Status || e.Reason != d.Reason {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *ManifestWorkReconciler) SetupWithManager(mgr ctrl.Manager) error {
