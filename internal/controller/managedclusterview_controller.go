@@ -69,7 +69,7 @@ func (r *ManagedClusterViewReconciler) Reconcile(ctx context.Context, req ctrl.R
 	clusterName := mcv.Namespace
 	scope := mcv.Spec.Scope
 
-	log.V(1).Info("Processing MCV", "cluster", clusterName,
+	log.V(2).Info("Processing MCV", "cluster", clusterName,
 		"apiGroup", scope.Group, "kind", scope.Kind, "name", scope.Name, "namespace", scope.Namespace)
 
 	// Get managed cluster client
@@ -91,7 +91,7 @@ func (r *ManagedClusterViewReconciler) Reconcile(ctx context.Context, req ctrl.R
 		Resource: resource,
 	}
 
-	log.V(1).Info("Fetching resource", "gvr", gvr.String(), "name", scope.Name, "cluster", clusterName)
+	log.V(2).Info("Fetching resource", "gvr", gvr.String(), "name", scope.Name, "cluster", clusterName)
 
 	// Read the resource from the managed cluster
 	var result *unstructured.Unstructured
@@ -187,7 +187,9 @@ func (r *ManagedClusterViewReconciler) handleFetchSuccess(
 		return ctrl.Result{}, fmt.Errorf("unmarshaling result for status: %w", err)
 	}
 
-	// Compare with existing result — skip update if unchanged
+	// Compare with existing result — skip update if unchanged.
+	// Strip volatile metadata (resourceVersion, managedFields, etc.) before
+	// comparison so that server-side bookkeeping doesn't cause false diffs.
 	existingResult, _, _ := unstructured.NestedMap(mcv.Object, "status", "result")
 	existingConditions, _, _ := unstructured.NestedSlice(mcv.Object, "status", "conditions")
 
@@ -199,12 +201,12 @@ func (r *ManagedClusterViewReconciler) handleFetchSuccess(
 		}
 	}
 
-	if alreadySuccess && reflect.DeepEqual(existingResult, rawResult) {
+	if alreadySuccess && resultUnchanged(existingResult, rawResult) {
 		// Nothing changed — skip the status write
 		return requeue, nil
 	}
 
-	log.V(1).Info("MCV result changed, updating status", "mcv", mcv.GetName())
+	log.V(2).Info("MCV result changed, updating status", "mcv", mcv.GetName())
 
 	now := metav1.Now().Format(time.RFC3339)
 	conditions := []interface{}{
@@ -289,6 +291,72 @@ func pluralizeKind(kind string) string {
 
 	// Default: lowercase the entire kind and add 's'
 	return strings.ToLower(kind) + "s"
+}
+
+// resultUnchanged compares two unstructured result maps after stripping
+// volatile metadata fields that change on every reconcile (resourceVersion,
+// managedFields, generation, etc.). This prevents false diffs caused by
+// server-side bookkeeping on the managed cluster.
+func resultUnchanged(existing, fetched map[string]interface{}) bool {
+	if existing == nil || fetched == nil {
+		return existing == nil && fetched == nil
+	}
+
+	a := stripVolatileMetadata(existing)
+	b := stripVolatileMetadata(fetched)
+
+	return reflect.DeepEqual(a, b)
+}
+
+// stripVolatileMetadata returns a deep-ish copy of the object map with
+// frequently-changing fields removed so that comparisons reflect meaningful
+// changes only.
+func stripVolatileMetadata(obj map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(obj))
+	for k, v := range obj {
+		out[k] = v
+	}
+
+	// Strip volatile metadata fields
+	if md, ok := out["metadata"].(map[string]interface{}); ok {
+		cleaned := make(map[string]interface{}, len(md))
+		for k, v := range md {
+			cleaned[k] = v
+		}
+		delete(cleaned, "resourceVersion")
+		delete(cleaned, "managedFields")
+		delete(cleaned, "generation")
+		out["metadata"] = cleaned
+	}
+
+	// Strip timestamps from status.conditions — condition type/status/reason
+	// changes are meaningful, but lastTransitionTime changes on every reconcile.
+	if status, ok := out["status"].(map[string]interface{}); ok {
+		cleanedStatus := make(map[string]interface{}, len(status))
+		for k, v := range status {
+			cleanedStatus[k] = v
+		}
+		if conditions, ok := cleanedStatus["conditions"].([]interface{}); ok {
+			cleanedConds := make([]interface{}, len(conditions))
+			for i, c := range conditions {
+				if cm, ok := c.(map[string]interface{}); ok {
+					cc := make(map[string]interface{}, len(cm))
+					for k, v := range cm {
+						cc[k] = v
+					}
+					delete(cc, "lastTransitionTime")
+					delete(cc, "lastHeartbeatTime")
+					cleanedConds[i] = cc
+				} else {
+					cleanedConds[i] = c
+				}
+			}
+			cleanedStatus["conditions"] = cleanedConds
+		}
+		out["status"] = cleanedStatus
+	}
+
+	return out
 }
 
 // Ensure interfaces are satisfied
