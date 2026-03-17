@@ -1,0 +1,48 @@
+---
+# SPDX-FileCopyrightText: The RamenDR authors
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rto-rpo-test
+  namespace: ramen-test
+  labels:
+    app: rto-rpo-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rto-rpo-test
+  template:
+    metadata:
+      labels:
+        app: rto-rpo-test
+    spec:
+      containers:
+        - name: writer
+          image: busybox:1.36
+          command: ["/bin/sh", "/scripts/rto-rpo-writer.sh"]
+          env:
+            - name: WRITE_INTERVAL
+              value: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: scripts
+              mountPath: /scripts
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rto-rpo-data
+        - name: scripts
+          configMap:
+            name: rto-rpo-scripts
+            defaultMode: 0755

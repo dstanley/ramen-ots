@@ -1,0 +1,48 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: rto-rpo-test
+  namespace: argocd
+spec:
+  # Use OCM PlacementDecision as the cluster generator
+  generators:
+  - clusterDecisionResource:
+      # Reference the ConfigMap that defines how to read PlacementDecisions
+      configMapRef: acm-placement
+      # Select PlacementDecisions with this label
+      labelSelector:
+        matchLabels:
+          cluster.open-cluster-management.io/placement: rto-rpo-test-placement
+      # Requeue periodically to catch placement changes
+      requeueAfterSeconds: 30
+
+  # Template for the Application that will be created for each cluster
+  template:
+    metadata:
+      name: 'rto-rpo-test-{{name}}'
+      namespace: argocd
+      labels:
+        app: rto-rpo-test
+        cluster: '{{name}}'
+    spec:
+      project: dr-apps
+      source:
+        # Use the local test-app directory as source
+        # In production, this would be a Git repository
+        repoURL: https://github.com/dstanley/ramen-ots.git
+        targetRevision: main
+        path: examples/rke2/test-app
+        # Only deploy the application resources, not DR resources
+        directory:
+          include: '{configmap.yaml,deployment.yaml}'
+      destination:
+        # Deploy to the cluster from PlacementDecision
+        server: '{{server}}'
+        namespace: ramen-test
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+        - CreateNamespace=true
+        - PruneLast=true

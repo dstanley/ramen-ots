@@ -1,0 +1,230 @@
+---
+# SPDX-FileCopyrightText: The RamenDR authors
+# SPDX-License-Identifier: Apache-2.0
+
+# ManifestWork deploys the application to a managed cluster
+# Replace CLUSTER_NAME with the target cluster (harv or marv)
+apiVersion: work.open-cluster-management.io/v1
+kind: ManifestWork
+metadata:
+  name: rto-rpo-test-app
+  namespace: harv  # Change to target cluster name
+  labels:
+    app: rto-rpo-test
+spec:
+  workload:
+    manifests:
+      # Namespace
+      - apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: ramen-test
+          labels:
+            app: ramen-test
+
+      # ConfigMap with scripts
+      - apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: rto-rpo-scripts
+          namespace: ramen-test
+        data:
+          rto-rpo-writer.sh: |
+            #!/bin/sh
+            set -e
+
+            DATA_DIR="/data"
+            TIMESTAMP_FILE="${DATA_DIR}/timestamps.log"
+            STATE_FILE="${DATA_DIR}/state.json"
+            WRITE_INTERVAL="${WRITE_INTERVAL:-1}"
+
+            # Get current timestamp in epoch seconds (busybox compatible)
+            now_sec() {
+              date +%s
+            }
+
+            now_iso() {
+              date -u +"%Y-%m-%dT%H:%M:%SZ"
+            }
+
+            # Calculate time difference in human readable format
+            format_duration() {
+              local seconds=$1
+              local minutes=$((seconds / 60))
+              local hours=$((minutes / 60))
+
+              if [ $hours -gt 0 ]; then
+                echo "${hours}h $((minutes % 60))m $((seconds % 60))s"
+              elif [ $minutes -gt 0 ]; then
+                echo "${minutes}m $((seconds % 60))s"
+              else
+                echo "${seconds}s"
+              fi
+            }
+
+            echo "=============================================="
+            echo "  RTO/RPO Test Application"
+            echo "=============================================="
+            echo ""
+            echo "Hostname: $(hostname)"
+            echo "Start time: $(now_iso)"
+            echo "Data directory: ${DATA_DIR}"
+            echo "Write interval: ${WRITE_INTERVAL}s"
+            echo ""
+
+            # Check if this is a recovery (previous state exists)
+            if [ -f "${STATE_FILE}" ]; then
+              echo ">>> RECOVERY DETECTED <<<"
+              echo ""
+
+              LAST_WRITE=$(cat "${STATE_FILE}" | grep -o '"last_write_sec":[0-9]*' | cut -d: -f2)
+              LAST_HOSTNAME=$(cat "${STATE_FILE}" | grep -o '"hostname":"[^"]*"' | cut -d: -f2 | tr -d '"')
+              PREV_WRITE_COUNT=$(cat "${STATE_FILE}" | grep -o '"write_count":[0-9]*' | cut -d: -f2)
+
+              CURRENT_SEC=$(now_sec)
+
+              if [ -n "${LAST_WRITE}" ] && [ "${LAST_WRITE}" -gt 0 ] 2>/dev/null; then
+                RPO_SEC=$((CURRENT_SEC - LAST_WRITE))
+                echo "RPO Analysis:"
+                echo "  Last write time: $(date -d @${LAST_WRITE} -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -r ${LAST_WRITE} -u +"%Y-%m-%dT%H:%M:%SZ")"
+                echo "  Current time:    $(now_iso)"
+                echo "  RPO (data age):  $(format_duration ${RPO_SEC})"
+                echo "  RPO (seconds):   ${RPO_SEC}"
+                echo ""
+                # Log recovery event
+                echo "$(now_iso) RECOVERY rpo_sec=${RPO_SEC} from_host=${LAST_HOSTNAME}" >> "${TIMESTAMP_FILE}"
+              else
+                echo "  (Could not parse previous state)"
+                echo ""
+              fi
+
+              echo "Previous Instance:"
+              echo "  Hostname:    ${LAST_HOSTNAME:-unknown}"
+              echo "  Write count: ${PREV_WRITE_COUNT:-unknown}"
+              echo ""
+
+              echo "----------------------------------------------"
+              echo ""
+            else
+              echo "First run - no previous state found"
+              echo ""
+            fi
+
+            # Initialize counters
+            WRITE_COUNT=0
+            INSTANCE_START=$(now_sec)
+
+            echo "Starting timestamp writer (Ctrl+C to stop)..."
+            echo ""
+
+            # Write timestamps continuously
+            while true; do
+              CURRENT_SEC=$(now_sec)
+              WRITE_COUNT=$((WRITE_COUNT + 1))
+
+              # Write to log file
+              echo "$(now_iso) WRITE seq=${WRITE_COUNT} host=$(hostname)" >> "${TIMESTAMP_FILE}"
+
+              # Update state file (atomic write)
+              cat > "${STATE_FILE}.tmp" << EOF
+            {
+              "last_write_sec": ${CURRENT_SEC},
+              "last_write_iso": "$(now_iso)",
+              "hostname": "$(hostname)",
+              "instance_start_sec": ${INSTANCE_START},
+              "write_count": ${WRITE_COUNT}
+            }
+            EOF
+              mv "${STATE_FILE}.tmp" "${STATE_FILE}"
+
+              # Print status every 10 writes
+              if [ $((WRITE_COUNT % 10)) -eq 0 ]; then
+                UPTIME_SEC=$((CURRENT_SEC - INSTANCE_START))
+                echo "[$(now_iso)] Writes: ${WRITE_COUNT}, Uptime: $(format_duration ${UPTIME_SEC})"
+              fi
+
+              sleep ${WRITE_INTERVAL}
+            done
+
+          check-rpo.sh: |
+            #!/bin/sh
+            # Quick script to check current RPO without restarting the app
+
+            DATA_DIR="/data"
+            STATE_FILE="${DATA_DIR}/state.json"
+
+            if [ ! -f "${STATE_FILE}" ]; then
+              echo "No state file found"
+              exit 1
+            fi
+
+            LAST_WRITE=$(cat "${STATE_FILE}" | grep -o '"last_write_sec":[0-9]*' | cut -d: -f2)
+            CURRENT_SEC=$(date +%s)
+            RPO_SEC=$((CURRENT_SEC - LAST_WRITE))
+
+            echo "Last write: $(cat "${STATE_FILE}" | grep -o '"last_write_iso":"[^"]*"' | cut -d: -f2 | tr -d '"')"
+            echo "Current:    $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo "RPO:        ${RPO_SEC}s"
+
+      # PVC for data persistence
+      - apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: rto-rpo-data
+          namespace: ramen-test
+          labels:
+            app: rto-rpo-test
+            ramendr.openshift.io/protected: "true"
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: harvester-longhorn
+          resources:
+            requests:
+              storage: 1Gi
+
+      # Deployment
+      - apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: rto-rpo-test
+          namespace: ramen-test
+          labels:
+            app: rto-rpo-test
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: rto-rpo-test
+          template:
+            metadata:
+              labels:
+                app: rto-rpo-test
+            spec:
+              containers:
+                - name: writer
+                  image: busybox:1.36
+                  command: ["/bin/sh", "/scripts/rto-rpo-writer.sh"]
+                  env:
+                    - name: WRITE_INTERVAL
+                      value: "1"
+                  volumeMounts:
+                    - name: data
+                      mountPath: /data
+                    - name: scripts
+                      mountPath: /scripts
+                  resources:
+                    requests:
+                      memory: "32Mi"
+                      cpu: "10m"
+                    limits:
+                      memory: "64Mi"
+                      cpu: "100m"
+              volumes:
+                - name: data
+                  persistentVolumeClaim:
+                    claimName: rto-rpo-data
+                - name: scripts
+                  configMap:
+                    name: rto-rpo-scripts
+                    defaultMode: 0755

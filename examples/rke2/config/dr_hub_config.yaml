@@ -1,0 +1,30 @@
+---
+# SPDX-FileCopyrightText: The RamenDR authors
+# SPDX-License-Identifier: Apache-2.0
+
+# RamenConfig for Hub operator on RKE2 clusters
+# Deploy this configuration on the OCM hub cluster
+apiVersion: ramendr.openshift.io/v1alpha1
+kind: RamenConfig
+health:
+  healthProbeBindAddress: :8081
+metrics:
+  bindAddress: 127.0.0.1:9289
+webhook:
+  port: 9443
+leaderElection:
+  leaderElect: true
+  resourceName: hub.ramendr.openshift.io
+ramenControllerType: "dr-hub"
+maxConcurrentReconciles: 50
+
+# S3 store profiles for backup storage
+# Configure with your S3-compatible storage (MinIO, AWS S3, etc.)
+s3StoreProfiles:
+  - s3ProfileName: "minio-on-hub"
+    s3Bucket: "ramen"
+    s3CompatibleEndpoint: "http://minio.minio-system.svc.cluster.local:9000"
+    s3Region: "us-east-1"
+    s3SecretRef:
+      name: "s3-secret"
+      namespace: "ramen-system"

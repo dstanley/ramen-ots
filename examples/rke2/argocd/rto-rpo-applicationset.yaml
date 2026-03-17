@@ -1,0 +1,99 @@
+# RTO/RPO Test Application - ArgoCD ApplicationSet with Placement Integration
+#
+# This ApplicationSet automatically deploys the RTO/RPO test application to
+# whichever cluster is selected by the PlacementDecision. When Ramen updates
+# the PlacementDecision during DR operations, ArgoCD automatically:
+# 1. Removes the Application from the old cluster (prunes resources)
+# 2. Creates a new Application for the new cluster
+# 3. Syncs the application to the new cluster
+#
+# Prerequisites:
+# - ArgoCD installed on hub cluster
+# - setup-argocd.sh has been run to configure Placement integration
+# - DRPlacementControl and Placement created in ramen-test namespace
+#
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: rto-rpo-test
+  namespace: argocd
+spec:
+  # Use goTemplate for more flexibility
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+
+  generators:
+  # ClusterDecisionResource generator reads from OCM PlacementDecision
+  - clusterDecisionResource:
+      configMapRef: acm-placement
+      labelSelector:
+        matchLabels:
+          cluster.open-cluster-management.io/placement: rto-rpo-test-placement
+      # Check for placement changes frequently during DR operations
+      requeueAfterSeconds: 10
+
+  # Template for the ArgoCD Application
+  template:
+    metadata:
+      name: 'rto-rpo-test-{{ .name }}'
+      namespace: argocd
+      labels:
+        app: rto-rpo-test
+        cluster: '{{ .name }}'
+        dr-protected: "true"
+      # Finalizer ensures resources are cleaned up when Application is deleted
+      finalizers:
+      - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: dr-apps
+
+      # Source: Ramen repository test-app directory
+      # Update repoURL and targetRevision to match your fork/branch
+      sources:
+      - repoURL: https://github.com/dstanley/ramen-ots.git
+        targetRevision: main
+        path: examples/rke2/test-app
+        directory:
+          recurse: false
+          # Only include app resources, not DR resources.
+          # PVC is excluded - Ramen manages PVC lifecycle during DR operations.
+          # Including pvc.yaml here causes dual ownership conflicts on failover.
+          include: '{namespace.yaml,configmap.yaml,deployment.yaml}'
+
+      # Destination: Cluster from PlacementDecision
+      destination:
+        server: '{{ .server }}'
+        namespace: ramen-test
+
+      # Sync policy for automatic deployment
+      syncPolicy:
+        automated:
+          # Prune resources that are no longer in Git
+          prune: true
+          # Self-heal if someone manually changes resources
+          selfHeal: true
+          # Allow empty applications (for graceful handling of no resources)
+          allowEmpty: false
+        syncOptions:
+        # Create namespace if it doesn't exist
+        - CreateNamespace=true
+        # Prune last to ensure dependent resources are deleted first
+        - PruneLast=true
+        # Apply out of sync only
+        - ApplyOutOfSyncOnly=true
+        # Server-side apply for large resources
+        - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
+
+      # Ignore differences that Ramen might modify
+      ignoreDifferences:
+      - group: ""
+        kind: PersistentVolumeClaim
+        jsonPointers:
+        - /metadata/labels/ramendr.openshift.io~1created-by-ramen
+        - /metadata/annotations

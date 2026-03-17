@@ -1,0 +1,29 @@
+---
+# SPDX-FileCopyrightText: The RamenDR authors
+# SPDX-License-Identifier: Apache-2.0
+
+# DRPlacementControl enables DR protection for the application
+apiVersion: ramendr.openshift.io/v1alpha1
+kind: DRPlacementControl
+metadata:
+  name: rto-rpo-test-drpc
+  namespace: ramen-test
+  labels:
+    app: rto-rpo-test
+spec:
+  # Reference to the Placement that controls app scheduling
+  placementRef:
+    kind: Placement
+    name: rto-rpo-test-placement
+
+  # Reference to the DRPolicy that defines replication settings
+  drPolicyRef:
+    name: dr-policy
+
+  # PVC selector - which PVCs to protect
+  pvcSelector:
+    matchLabels:
+      app: rto-rpo-test
+
+  # Preferred cluster for initial deployment
+  preferredCluster: harv

@@ -1,0 +1,15 @@
+---
+# SPDX-FileCopyrightText: The RamenDR authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Placement determines which cluster the application should run on
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: rto-rpo-test-placement
+  namespace: ramen-test
+spec:
+  # Select from clusters that are part of our DR setup
+  clusterSets:
+    - default
+  numberOfClusters: 1

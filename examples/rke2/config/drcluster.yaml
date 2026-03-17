@@ -1,0 +1,26 @@
+---
+# SPDX-FileCopyrightText: The RamenDR authors
+# SPDX-License-Identifier: Apache-2.0
+
+# DRCluster resources for RKE2 clusters
+# Create one DRCluster resource per managed cluster on the hub
+
+# Primary cluster (Harvester 1)
+apiVersion: ramendr.openshift.io/v1alpha1
+kind: DRCluster
+metadata:
+  name: harv
+spec:
+  # S3 profile for storing cluster data
+  s3ProfileName: "minio-on-hub"
+  # Optional: specify region for sync DR
+  region: "east"
+---
+# Secondary cluster (Harvester 2)
+apiVersion: ramendr.openshift.io/v1alpha1
+kind: DRCluster
+metadata:
+  name: marv
+spec:
+  s3ProfileName: "minio-on-hub"
+  region: "west"

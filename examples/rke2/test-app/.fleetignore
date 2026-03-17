@@ -1,0 +1,22 @@
+# Files excluded from Fleet deployment
+#
+# Namespace excluded - demo-dr.sh creates the namespace before Fleet deploys.
+# Fleet (Helm) cannot adopt a namespace it didn't create.
+namespace.yaml
+
+# PVC excluded - Ramen manages PVC lifecycle during DR operations.
+# Including pvc.yaml causes dual ownership conflicts on failover.
+pvc.yaml
+
+# DR resources are managed on the hub cluster, not by Fleet
+placement.yaml
+drplacementcontrol.yaml
+
+# ManifestWork is for the ManifestWork deployment model
+manifestwork.yaml
+
+# Kustomization is not used by Fleet
+kustomization.yaml
+
+# Documentation
+README.md

@@ -1,0 +1,90 @@
+# RTO/RPO Test Application - ArgoCD ApplicationSet with Cluster Generator
+#
+# This ApplicationSet uses the Cluster generator with label selector to deploy
+# to clusters that have the ramen.dr/enabled=true label. This works around
+# the ClusterDecisionResource generator limitation where it only looks for
+# PlacementDecisions in the argocd namespace.
+#
+# How it works:
+# 1. argocd-dr-controller.sh watches PlacementDecision changes
+# 2. When PlacementDecision changes, controller updates cluster labels
+# 3. ArgoCD ApplicationSet detects label change and redeploys
+#
+# Prerequisites:
+# - ArgoCD installed on hub cluster
+# - setup-argocd.sh has been run to add clusters
+# - argocd-dr-controller.sh running to manage labels
+# - DRPlacementControl and Placement created in ramen-test namespace
+#
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: rto-rpo-test
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+
+  generators:
+  # Cluster generator with label selector
+  # Only deploys to clusters with ramen.dr/enabled=true label
+  - clusters:
+      selector:
+        matchLabels:
+          ramen.dr/enabled: "true"
+
+  template:
+    metadata:
+      name: 'rto-rpo-test-{{ .name }}'
+      namespace: argocd
+      labels:
+        app: rto-rpo-test
+        cluster: '{{ .name }}'
+        dr-protected: "true"
+      finalizers:
+      - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: dr-apps
+
+      # Source: Ramen repository test-app directory
+      # Update repoURL and targetRevision to match your fork/branch
+      sources:
+      - repoURL: https://github.com/dstanley/ramen-ots.git
+        targetRevision: main
+        path: examples/rke2/test-app
+        directory:
+          recurse: false
+          # PVC is excluded - Ramen manages PVC lifecycle during DR operations.
+          # Including pvc.yaml here causes dual ownership conflicts on failover.
+          include: '{namespace.yaml,configmap.yaml,deployment.yaml}'
+
+      # Destination: Cluster with the label
+      destination:
+        server: '{{ .server }}'
+        namespace: ramen-test
+
+      # Sync policy for automatic deployment
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+          allowEmpty: false
+        syncOptions:
+        - CreateNamespace=true
+        - PruneLast=true
+        - ApplyOutOfSyncOnly=true
+        - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
+
+      # Ignore differences that Ramen might modify
+      ignoreDifferences:
+      - group: ""
+        kind: PersistentVolumeClaim
+        jsonPointers:
+        - /metadata/labels/ramendr.openshift.io~1created-by-ramen
+        - /metadata/annotations

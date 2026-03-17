@@ -1,0 +1,8 @@
+# Fleet configuration for RTO/RPO Test Application
+#
+# This file tells Fleet how to deploy the manifests in this directory.
+# Fleet discovers this file when scanning the path specified in the GitRepo.
+#
+# The .fleetignore file in this directory excludes pvc.yaml and other
+# non-application resources. Ramen manages PVC lifecycle during DR operations.
+defaultNamespace: ramen-test

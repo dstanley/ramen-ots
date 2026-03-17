@@ -1,0 +1,17 @@
+---
+# SPDX-FileCopyrightText: The RamenDR authors
+# SPDX-License-Identifier: Apache-2.0
+
+# DRPolicy for RKE2 clusters using VolSync replication
+# This policy enables async DR between two RKE2 clusters
+apiVersion: ramendr.openshift.io/v1alpha1
+kind: DRPolicy
+metadata:
+  name: dr-policy
+spec:
+  # List of DRCluster names participating in this policy
+  drClusters:
+    - harv
+    - marv
+  # Replication scheduling interval (for VolSync)
+  schedulingInterval: "5m"

@@ -1,0 +1,41 @@
+# RTO/RPO Test Application - Fleet GitRepo with Cluster Label Targeting
+#
+# This GitRepo uses clusterSelector with label matching to deploy to
+# clusters that have the ramen.dr/fleet-enabled=true label. This works
+# analogously to the ArgoCD Cluster generator approach.
+#
+# How it works:
+# 1. fleet-dr-controller.sh watches PlacementDecision changes
+# 2. When PlacementDecision changes, controller updates Fleet cluster labels
+# 3. Fleet detects label change and creates/removes BundleDeployment
+# 4. Fleet agent on managed cluster deploys/removes resources
+#
+# Prerequisites:
+# - Fleet installed on hub cluster (via Rancher)
+# - Managed clusters registered with Rancher/Fleet
+# - fleet-dr-controller.sh running to manage labels
+# - DRPlacementControl and Placement created in ramen-test namespace
+#
+apiVersion: fleet.cattle.io/v1alpha1
+kind: GitRepo
+metadata:
+  name: rto-rpo-test
+  namespace: fleet-default
+spec:
+  # Source: ramen-ots repository
+  # Update repo and branch to match your fork/branch
+  repo: https://github.com/dstanley/ramen-ots.git
+  branch: main
+
+  # Path within the repo containing the application manifests
+  # Fleet reads fleet.yaml and .fleetignore from this directory
+  paths:
+    - examples/rke2/test-app
+
+  # Target clusters with the DR label
+  # Only deploys to clusters with ramen.dr/fleet-enabled=true
+  targets:
+    - name: dr-enabled
+      clusterSelector:
+        matchLabels:
+          ramen.dr/fleet-enabled: "true"
