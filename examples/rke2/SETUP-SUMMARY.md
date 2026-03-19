@@ -163,6 +163,7 @@ Ramen requires several CRDs on managed clusters for the DR cluster operator to f
 
 Only the VolumeReplication and VolumeReplicationClass CRDs are strictly required — the DR cluster operator will crash without them. The remaining CRDs are optional: VolumeGroupReplication and VolumeGroupSnapshot CRDs enable consistency group support for multi-PVC applications, while NetworkFenceClass and CSIAddonsNode enable storage-level network fencing for shared storage backends (e.g., Dell PowerFlex, Ceph/RBD). We install all of them since they are harmless if unused and avoid debugging missing-CRD issues later.
 
+```
 for cluster in harv marv; do
   echo "=== Applying CRDs to $cluster ==="
   kubie exec $cluster default kubectl apply -f hack/test/replication.storage.openshift.io_volumereplicationclasses.yaml
