@@ -1,4 +1,4 @@
-IMG ?= ramen-ots:latest
+IMG ?= ramen-ots:dev
 
 .PHONY: build
 build:

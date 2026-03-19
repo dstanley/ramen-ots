@@ -37,6 +37,9 @@ func main() {
 		secretNamespace      string
 		fallbackKubeconfig   string
 		mcvRequeueInterval   time.Duration
+		enableFleetController bool
+		fleetLabelKey        string
+		fleetNamespace       string
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
@@ -49,6 +52,12 @@ func main() {
 		"Path to a kubeconfig file with contexts matching cluster names (dev/testing).")
 	flag.DurationVar(&mcvRequeueInterval, "mcv-requeue-interval", 15*time.Second,
 		"Requeue interval for ManagedClusterView polling.")
+	flag.BoolVar(&enableFleetController, "enable-fleet-controller", false,
+		"Enable the Fleet PlacementDecision controller for managing Fleet cluster labels.")
+	flag.StringVar(&fleetLabelKey, "fleet-label-key", "ramen.dr/fleet-enabled",
+		"Label key to set on Fleet Cluster resources for DR targeting.")
+	flag.StringVar(&fleetNamespace, "fleet-namespace", "fleet-default",
+		"Namespace where Fleet Cluster resources are located.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -93,6 +102,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register Fleet PlacementDecision controller (optional)
+	if enableFleetController {
+		if err := setupFleetPlacementController(mgr, log, fleetLabelKey, fleetNamespace); err != nil {
+			log.Error(err, "unable to create Fleet PlacementDecision controller")
+			os.Exit(1)
+		}
+	}
+
 	// Health checks
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		log.Error(err, "unable to set up health check")
@@ -106,7 +123,8 @@ func main() {
 	log.Info("Starting manager",
 		"namespace", secretNamespace,
 		"metrics", metricsAddr,
-		"health", healthProbeAddr)
+		"health", healthProbeAddr,
+		"fleetController", enableFleetController)
 
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		log.Error(err, "problem running manager")
@@ -137,6 +155,16 @@ func setupSecretPropagatorController(mgr ctrl.Manager, log logr.Logger) error {
 	reconciler := &controller.SecretPropagatorReconciler{
 		Client: mgr.GetClient(),
 		Log:    log.WithName("secretpropagator"),
+	}
+	return reconciler.SetupWithManager(mgr)
+}
+
+func setupFleetPlacementController(mgr ctrl.Manager, log logr.Logger, labelKey, namespace string) error {
+	reconciler := &controller.FleetPlacementReconciler{
+		Client:         mgr.GetClient(),
+		Log:            log.WithName("fleet-placement"),
+		FleetLabelKey:  labelKey,
+		FleetNamespace: namespace,
 	}
 	return reconciler.SetupWithManager(mgr)
 }

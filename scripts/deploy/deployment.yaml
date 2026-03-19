@@ -18,12 +18,13 @@ spec:
       serviceAccountName: ramen-ots-controller
       containers:
         - name: controller
-          image: registry.192.168.7.68.nip.io/ramen-ots:latest
-          imagePullPolicy: IfNotPresent
+          image: registry.192.168.7.68.nip.io/ramen-ots:dev
+          imagePullPolicy: Always
           args:
             - --namespace=ramen-ots-system
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
+            - --enable-fleet-controller
           ports:
             - containerPort: 8080
               name: metrics

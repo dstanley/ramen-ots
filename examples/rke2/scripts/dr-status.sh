@@ -55,6 +55,23 @@ show_status() {
     echo "Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo ""
 
+    # OTS Controller
+    echo -e "${BLUE}OTS Controller:${NC}"
+    OTS_ARGS=$(kubectl --context "$HUB_CONTEXT" get deployment ramen-ots-controller -n ramen-ots-system \
+        -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null || echo "")
+    if [[ -n "$OTS_ARGS" ]]; then
+        OTS_READY=$(kubectl --context "$HUB_CONTEXT" get deployment ramen-ots-controller -n ramen-ots-system \
+            -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+        if echo "$OTS_ARGS" | grep -q "enable-fleet-controller"; then
+            echo -e "  Fleet Controller: ${GREEN}Enabled${NC} (replicas ready: ${OTS_READY:-0})"
+        else
+            echo "  Fleet Controller: Disabled (replicas ready: ${OTS_READY:-0})"
+        fi
+    else
+        echo -e "  ${RED}Not deployed${NC}"
+    fi
+    echo ""
+
     # DRPC Status
     echo -e "${BLUE}DRPC: $DRPC_NAME${NC}"
     DRPC_JSON=$(kubectl --context "$HUB_CONTEXT" get drpc "$DRPC_NAME" -n "$NAMESPACE" -o json 2>/dev/null)

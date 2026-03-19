@@ -31,6 +31,14 @@ rules:
   - apiGroups: ["ramendr.openshift.io"]
     resources: ["drpolicies"]
     verbs: ["get", "list", "watch"]
+  # PlacementDecision - watch for Fleet label sync
+  - apiGroups: ["cluster.open-cluster-management.io"]
+    resources: ["placementdecisions"]
+    verbs: ["get", "list", "watch"]
+  # Fleet Clusters - label management for DR targeting
+  - apiGroups: ["fleet.cattle.io"]
+    resources: ["clusters"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   # Events
   - apiGroups: [""]
     resources: ["events"]
