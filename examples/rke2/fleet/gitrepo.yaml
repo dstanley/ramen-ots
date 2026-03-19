@@ -5,15 +5,15 @@
 # analogously to the ArgoCD Cluster generator approach.
 #
 # How it works:
-# 1. fleet-dr-controller.sh watches PlacementDecision changes
-# 2. When PlacementDecision changes, controller updates Fleet cluster labels
+# 1. OTS Fleet reconciler watches PlacementDecision changes
+# 2. When PlacementDecision changes, reconciler updates Fleet cluster labels
 # 3. Fleet detects label change and creates/removes BundleDeployment
 # 4. Fleet agent on managed cluster deploys/removes resources
 #
 # Prerequisites:
 # - Fleet installed on hub cluster (via Rancher)
 # - Managed clusters registered with Rancher/Fleet
-# - fleet-dr-controller.sh running to manage labels
+# - OTS controller running with --enable-fleet-controller
 # - DRPlacementControl and Placement created in ramen-test namespace
 #
 apiVersion: fleet.cattle.io/v1alpha1

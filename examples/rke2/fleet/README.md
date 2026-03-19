@@ -88,7 +88,12 @@ Configuration flags:
 | `--fleet-namespace` | `fleet-default` | Namespace where Fleet Cluster resources are located |
 
 PlacementDecision resources must be annotated with `ramen.dr/fleet-managed=true`
-for the controller to process them.
+for the controller to process them. The `demo-dr.sh` script sets this
+annotation automatically when using `--model fleet`. To set it manually:
+
+```bash
+kubectl annotate placementdecision <name> -n <namespace> ramen.dr/fleet-managed=true --context rke2
+```
 
 ### Deploy Application with Fleet
 
@@ -134,7 +139,16 @@ Fleet handles relocate automatically:
 
 ## PVC Ownership
 
-Fleet **must not** deploy the PVC. Ramen manages PVC lifecycle during DR operations. The `.fleetignore` file in `test-app/` excludes `pvc.yaml` and other non-application files. The initial PVC is created by `demo-dr.sh` via ManifestWork.
+Fleet **must not** deploy the PVC. Ramen manages PVC lifecycle during DR
+operations. The `.fleetignore` file in `test-app/` excludes these files:
+
+- `pvc.yaml` — PVC is managed by Ramen (dual ownership causes failover conflicts)
+- `namespace.yaml` — created by `demo-dr.sh` before Fleet deploys (Fleet/Helm cannot adopt existing namespaces)
+- `placement.yaml`, `drplacementcontrol.yaml` — hub-only DR resources
+- `manifestwork.yaml`, `kustomization.yaml` — other deployment models
+
+The initial PVC is created by `demo-dr.sh` via ManifestWork. Fleet only
+deploys the application Deployment and ConfigMap.
 
 ## Comparison: ManifestWork vs ArgoCD vs Fleet
 

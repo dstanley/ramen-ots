@@ -5,7 +5,7 @@
 # This script verifies Fleet is installed and discovers managed cluster
 # registrations. Since Fleet is bundled with Rancher, most setup is
 # already done - this script validates the environment and shows the
-# cluster ID mapping needed by fleet-dr-controller.sh.
+# cluster ID mapping used by the OTS Fleet PlacementDecision controller.
 
 set -e
 
@@ -68,7 +68,7 @@ discover_clusters() {
     done <<< "$clusters"
     echo ""
 
-    log "The fleet-dr-controller.sh resolves OCM cluster names to Fleet IDs"
+    log "The OTS Fleet controller resolves managed cluster names to Fleet IDs"
     log "using the management.cattle.io/cluster-display-name label"
 }
 
@@ -117,7 +117,7 @@ main() {
     echo ""
     log "Next steps:"
     echo "  1. Apply the GitRepo:  kubectl apply -f gitrepo.yaml --context $HUB_CONTEXT"
-    echo "  2. Start controller:   ./fleet-dr-controller.sh"
+    echo "  2. Verify OTS controller has --enable-fleet-controller flag"
     echo "  3. Deploy DR resources: ../scripts/demo-dr.sh deploy harv --model fleet"
     echo ""
 }
