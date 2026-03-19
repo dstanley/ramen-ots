@@ -6,7 +6,9 @@ This document describes the architecture and components involved in running Rame
 
 [Ramen](https://github.com/RamenDR/ramen) provides application-level disaster recovery for Kubernetes workloads across multiple clusters. It uses OCM (Open Cluster Management) CRDs as the multi-cluster API layer, with the OTS controller fulfilling ManifestWork and ManagedClusterView CRs via direct kubeconfig access to managed clusters.
 
-The approach is informed by Martin Jackson's ramendr-analysis, which examines Ramen's OCM dependencies and proposes abstractions for decoupling them.
+The approach is informed by Martin Jackson's
+[ramendr-analysis](https://github.com/mhjacks/ramendr-analysis), which examines
+Ramen's OCM dependencies and proposes abstractions for decoupling them.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -115,7 +117,7 @@ Ramen uses S3 as a coordination point between clusters during failover.
 
 ## Managed Cluster Components
 
-No OCM agents or addons are required on managed clusters. The OTS controller on the hub handles all ManifestWork and ManagedClusterView fulfillment directly via kubeconfig access.
+The OTS controller on the hub handles all ManifestWork and ManagedClusterView fulfillment directly via kubeconfig access. No OCM agents or addons are required on managed clusters. 
 
 ### Ramen DR Cluster Operator
 
@@ -269,83 +271,60 @@ With Submariner:
 
 Ramen supports applications deployed via different deployment models. Understanding these models is critical because **how your application is deployed determines whether failover completes automatically or requires manual intervention**.
 
-### Model 1: OCM Subscription/Channel (Requires OCM Runtime)
+### Model 1: Rancher Fleet GitRepo
 
-OCM Subscriptions provide GitOps-style application deployment with automatic cluster placement. **This model requires the full OCM runtime (klusterlet, subscription controller, etc.) and is not used with the OTS controller.**
+Fleet is Rancher's built-in GitOps engine. It deploys workloads from Git repositories to downstream clusters using a pull-based architecture. This is the default deployment model for OTS environments with Rancher.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              Hub Cluster                                     │
 │                                                                              │
-│  ┌─────────────┐     ┌─────────────┐     ┌─────────────────────────────┐    │
-│  │   Channel   │────>│Subscription │────>│      PlacementRule/         │    │
-│  │  (Git repo) │     │ (selects    │     │       Placement             │    │
-│  │             │     │  packages)  │     │  (selects target clusters)  │    │
-│  └─────────────┘     └──────┬──────┘     └──────────────┬──────────────┘    │
-│                             │                           │                    │
-│                             │                           ▼                    │
-│                             │              ┌─────────────────────────┐       │
-│                             │              │   PlacementDecision     │       │
-│                             │              │   (cluster: harv)       │       │
-│                             │              └───────────┬─────────────┘       │
-│                             │                          │                     │
-│                             ▼                          ▼                     │
-│                    subscription-controller watches PlacementDecision         │
-│                    and deploys to selected cluster                           │
+│  ┌──────────────────────┐     ┌─────────────────────────────┐               │
+│  │      GitRepo         │────>│      Cluster Selector       │               │
+│  │  (Git repo + path    │     │  ramen.dr/fleet-enabled=true│               │
+│  │   for manifests)     │     └──────────────┬──────────────┘               │
+│  └──────────┬───────────┘                    │                              │
+│             │                                ▼                              │
+│             │                   ┌─────────────────────────┐                 │
+│             │                   │   Fleet Cluster (harv)  │                 │
+│             │                   │   c-npk9v               │                 │
+│             │                   └───────────┬─────────────┘                 │
+│             │                               │                               │
+│             ▼                               ▼                               │
+│  Fleet controller creates BundleDeployment for matching cluster             │
+│             │                                                               │
+│             ▼                                                               │
+│  ┌────────────────────┐                                                     │
+│  │  BundleDeployment  │  (Fleet agent pulls and deploys)                    │
+│  │  (for cluster harv)│                                                     │
+│  └────────────────────┘                                                     │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    │ ManifestWork (app resources)
-                                    ▼
-                           ┌─────────────────┐
-                           │  Managed Cluster │
-                           │     (harv)       │
-                           │                  │
-                           │  [Application]   │
-                           └─────────────────┘
 ```
 
-**Key Components:**
+**How Fleet Deployment Works:**
 
-| Resource | Purpose |
-|----------|---------|
-| **Channel** | Points to a source repository (Git, Helm, ObjectBucket, or Namespace) containing deployable content |
-| **Subscription** | Selects what to deploy from a Channel (package filters, version) and references a Placement |
-| **Placement/PlacementRule** | Defines criteria for selecting target clusters (labels, claims, etc.) |
-| **PlacementDecision** | Created by placement-controller; contains the actual list of selected clusters |
+1. User creates a GitRepo pointing to a Git repository with application manifests
+2. GitRepo uses `clusterSelector` to target clusters with `ramen.dr/fleet-enabled=true`
+3. OTS Fleet PlacementDecision reconciler watches PlacementDecision and labels/unlabels Fleet Cluster resources
+4. Fleet controller creates BundleDeployment for matching clusters
+5. Fleet agent on the managed cluster pulls and deploys the resources
 
-**How Subscription Deployment Works:**
+**Fleet Cluster Naming:**
 
-1. User creates a Channel pointing to a Git repo with Kubernetes manifests
-2. User creates a Subscription referencing the Channel and a Placement
-3. Placement controller evaluates cluster criteria and creates a PlacementDecision
-4. Subscription controller watches PlacementDecision and creates ManifestWorks for selected clusters
-5. Klusterlet work-agent on each managed cluster applies the manifests
+Fleet uses auto-generated cluster IDs (e.g., `c-npk9v`) rather than friendly names. The display name is available via the `management.cattle.io/cluster-display-name` label. The OTS Fleet reconciler resolves managed cluster names to Fleet IDs using this label.
 
-**How Subscription Interacts with PlacementDecision Changes:**
+**DR Behavior:**
 
-When Ramen updates the PlacementDecision during failover:
-- The subscription controller **detects** the PlacementDecision change
-- When a **new cluster is added** to decisions, it **automatically creates** ManifestWorks to deploy the application
-- **Application deployment on new primary is automatic**
+When Ramen updates the PlacementDecision:
+- OTS Fleet reconciler detects the change and relabels Fleet clusters
+- Fleet **automatically removes** BundleDeployment from the old cluster
+- Fleet **automatically creates** BundleDeployment for the new cluster
+- Fleet agent deploys the application on the new cluster
+- **Automatic failover and relocate** - no manual intervention required
 
-**⚠️ Known Limitation: Source Cluster Cleanup During Relocate**
+**PVC Ownership:**
 
-During relocate operations, Ramen temporarily empties the PlacementDecision to quiesce the application on the source cluster. However:
-
-1. The subscription controller **does NOT remove** the ManifestWork when PlacementDecision becomes empty
-2. The application keeps running on the source cluster, preventing PVC final sync
-3. **Manual intervention may be required** to delete the ManifestWork from the source cluster namespace on the hub
-
-**Workaround for Relocate:**
-```bash
-# If relocate is stuck at RunningFinalSync, check for orphaned ManifestWork
-kubectl get manifestwork -n <source-cluster-namespace> | grep <app-name>
-
-# Delete the orphaned ManifestWork to allow application cleanup
-kubectl delete manifestwork <app-manifestwork-name> -n <source-cluster-namespace>
-```
-
-This is expected behavior per OCM design - the subscription controller is designed for GitOps workflows where the subscription lifecycle manages the app lifecycle. For DR, Ramen manipulates the PlacementDecision rather than the subscription, which doesn't trigger automatic cleanup.
+The GitRepo **must not** include PVC manifests. Ramen manages PVC lifecycle during DR operations. A `.fleetignore` file in the app directory excludes PVC and other DR-managed resources (`pvc.yaml`, `namespace.yaml`, `placement.yaml`, `drplacementcontrol.yaml`, `manifestwork.yaml`, `kustomization.yaml`).
 
 ### Model 2: ArgoCD ApplicationSet
 
@@ -410,7 +389,7 @@ Create the initial PVC separately (e.g., via ManifestWork or deployment script) 
 
 ### Model 3: ManifestWork Only (Manual Application Deployment)
 
-If your application is deployed directly via kubectl, Helm, or other methods without OCM Subscription or ArgoCD, Ramen cannot automatically move the application.
+If your application is deployed directly via kubectl, Helm, or other methods without a GitOps controller watching PlacementDecision, Ramen cannot automatically move the application.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -448,93 +427,34 @@ When Ramen updates the PlacementDecision:
 - **Application must be manually deployed** ❌
 - Failover is **incomplete** until user deploys the application
 
-### Model 4: Rancher Fleet GitRepo
-
-Fleet is Rancher's built-in GitOps engine. It deploys workloads from Git repositories to downstream clusters using a pull-based architecture.
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              Hub Cluster                                     │
-│                                                                              │
-│  ┌──────────────────────┐     ┌─────────────────────────────┐               │
-│  │      GitRepo         │────>│      Cluster Selector       │               │
-│  │  (Git repo + path    │     │  ramen.dr/fleet-enabled=true│               │
-│  │   for manifests)     │     └──────────────┬──────────────┘               │
-│  └──────────┬───────────┘                    │                              │
-│             │                                ▼                              │
-│             │                   ┌─────────────────────────┐                 │
-│             │                   │   Fleet Cluster (harv)  │                 │
-│             │                   │   c-npk9v               │                 │
-│             │                   └───────────┬─────────────┘                 │
-│             │                               │                               │
-│             ▼                               ▼                               │
-│  Fleet controller creates BundleDeployment for matching cluster             │
-│             │                                                               │
-│             ▼                                                               │
-│  ┌────────────────────┐                                                     │
-│  │  BundleDeployment  │  (Fleet agent pulls and deploys)                    │
-│  │  (for cluster harv)│                                                     │
-│  └────────────────────┘                                                     │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-**How Fleet Deployment Works:**
-
-1. User creates a GitRepo pointing to a Git repository with application manifests
-2. GitRepo uses `clusterSelector` to target clusters with `ramen.dr/fleet-enabled=true`
-3. `fleet-dr-controller.sh` watches PlacementDecision and labels/unlabels Fleet Cluster resources
-4. Fleet controller creates BundleDeployment for matching clusters
-5. Fleet agent on the managed cluster pulls and deploys the resources
-
-**Fleet Cluster Naming:**
-
-Fleet uses auto-generated cluster IDs (e.g., `c-npk9v`) rather than friendly names. The display name is available via the `management.cattle.io/cluster-display-name` label. The DR controller translates between OCM cluster names and Fleet IDs.
-
-**DR Behavior:**
-
-When Ramen updates the PlacementDecision:
-- `fleet-dr-controller.sh` detects the change and relabels Fleet clusters
-- Fleet **automatically removes** BundleDeployment from the old cluster
-- Fleet **automatically creates** BundleDeployment for the new cluster
-- Fleet agent deploys the application on the new cluster
-- **Automatic failover and relocate** - no manual intervention required
-
-**PVC Ownership:**
-
-The GitRepo **must not** include PVC manifests. A `.fleetignore` file in the app directory excludes `pvc.yaml`. This is the Fleet equivalent of ArgoCD's `directory.include` filter.
-
 ### Comparison: Failover vs Relocate Behavior by Deployment Model
 
 #### Failover (Source cluster unavailable)
 
-| Step | OCM Subscription | ArgoCD ApplicationSet | Fleet GitRepo | ManifestWork Only |
-|------|------------------|----------------------|---------------|-------------------|
-| Ramen updates PlacementDecision | ✓ Automatic | ✓ Automatic | ✓ Automatic | ✓ Automatic |
-| VRG created on target cluster | ✓ Automatic | ✓ Automatic | ✓ Automatic | ✓ Automatic |
-| PVCs restored/promoted | ✓ Automatic | ✓ Automatic | ✓ Automatic | ✓ Automatic |
-| Application deployed to target | ✓ **Automatic** | ✓ **Automatic** | ✓ **Automatic** | ❌ **Manual** |
-| Failover completes without intervention | ✓ Yes | ✓ Yes | ✓ Yes | ❌ No |
+| Step | Fleet GitRepo | ArgoCD ApplicationSet | ManifestWork Only |
+|------|---------------|----------------------|-------------------|
+| Ramen updates PlacementDecision | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| VRG created on target cluster | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| PVCs restored/promoted | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| Application deployed to target | ✓ **Automatic** | ✓ **Automatic** | ❌ **Manual** |
+| Failover completes without intervention | ✓ Yes | ✓ Yes | ❌ No |
 
 #### Relocate (Both clusters available, requires final sync)
 
-| Step | OCM Subscription | ArgoCD ApplicationSet | Fleet GitRepo | ManifestWork Only |
-|------|------------------|----------------------|---------------|-------------------|
-| Ramen empties PlacementDecision | ✓ Automatic | ✓ Automatic | ✓ Automatic | ✓ Automatic |
-| Application removed from source | ⚠️ **Manual** (see note) | ✓ Automatic | ✓ Automatic | ❌ Manual |
-| Final sync completes | ✓ After cleanup | ✓ Automatic | ✓ Automatic | ⚠️ May block |
-| VRG created on target | ✓ Automatic | ✓ Automatic | ✓ Automatic | ✓ Automatic |
-| Application deployed to target | ✓ **Automatic** | ✓ **Automatic** | ✓ **Automatic** | ❌ **Manual** |
-| Relocate completes without intervention | ⚠️ May need manual cleanup | ✓ Yes | ✓ Yes | ❌ No |
-
-**⚠️ OCM Subscription Note:** The subscription controller does not automatically remove ManifestWork when PlacementDecision becomes empty. During relocate, you may need to manually delete the app ManifestWork from the source cluster namespace on the hub to allow the final sync to complete.
+| Step | Fleet GitRepo | ArgoCD ApplicationSet | ManifestWork Only |
+|------|---------------|----------------------|-------------------|
+| Ramen empties PlacementDecision | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| Application removed from source | ✓ Automatic | ✓ Automatic | ❌ Manual |
+| Final sync completes | ✓ Automatic | ✓ Automatic | ⚠️ May block |
+| VRG created on target | ✓ Automatic | ✓ Automatic | ✓ Automatic |
+| Application deployed to target | ✓ **Automatic** | ✓ **Automatic** | ❌ **Manual** |
+| Relocate completes without intervention | ✓ Yes | ✓ Yes | ❌ No |
 
 ### Recommendation
 
-**For production DR with relocate support:** Consider ArgoCD ApplicationSet or Fleet GitRepo as both handle failover and relocate automatically.
+**If using Rancher (default):** Fleet is the natural choice since it's already installed with Rancher. The OTS Fleet PlacementDecision reconciler handles label management automatically. No additional components needed.
 
-**If using Rancher:** Fleet is the natural choice since it's already installed. No additional components needed.
-
-**For failover-only scenarios with full OCM runtime:** OCM Subscription works well - the application is automatically deployed to the target cluster.
+**For ArgoCD environments:** ArgoCD ApplicationSet handles failover and relocate automatically via the ClusterDecisionResource generator.
 
 **If using ManifestWork-only deployment:** Be prepared to manually deploy applications and clean up the source during DR operations.
 
@@ -553,7 +473,7 @@ func getVRGNamespace(placement) string {
             return appSet.Spec.Template.Spec.Destination.Namespace
         }
     }
-    // Subscription model (default): use Placement namespace
+    // Default: use Placement namespace
     return placement.Namespace
 }
 ```
@@ -604,9 +524,8 @@ func getVRGNamespace(placement) string {
    └─> This triggers application deployment (see deployment model)
 
 5. Application controller reacts (model-dependent):
+   ├─> Fleet: OTS Fleet reconciler relabels cluster, Fleet deploys app to target
    ├─> ArgoCD: ApplicationSet creates Application for target cluster
-   ├─> Fleet: DR controller relabels cluster, Fleet deploys app to target
-   ├─> OCM Subscription: subscription-controller deploys app (requires OCM runtime)
    └─> ManifestWork only: ❌ NO AUTOMATIC DEPLOYMENT - manual intervention needed
 
 6. Hub DRPC controller - Progression: Completed
@@ -702,133 +621,9 @@ SettingUpVolSyncDest  (reverse replication)
 | Issue | Symptom | Cause | Solution |
 |-------|---------|-------|----------|
 | Failover stuck at WaitingForResourceRestore | VRG not becoming Primary | PVCs not restored, S3 access issue | Check VRG status, S3 connectivity |
-| Failover completes but app not running | DRPC shows Completed, no pods | ManifestWork-only deployment | Deploy app manually or use Subscription |
+| Failover completes but app not running | DRPC shows Completed, no pods | ManifestWork-only deployment | Deploy app manually or use Fleet/ArgoCD |
 | PlacementDecision not updating | DRPC stuck at UpdatingPlacement | Placement controller issue | Check placement-controller logs |
 | App deployed to wrong namespace | Pods in unexpected namespace | ApplicationSet namespace mismatch | Verify AppSet template destination |
-
----
-
-## Example: Setting Up OCM Subscription for Automatic Failover
-
-This example shows how to set up an OCM Subscription-based deployment that will automatically failover with Ramen.
-
-### 1. Create a Channel (Git Repository)
-
-```yaml
-apiVersion: apps.open-cluster-management.io/v1
-kind: Channel
-metadata:
-  name: my-app-channel
-  namespace: my-app-channel-ns
-spec:
-  type: Git
-  pathname: https://github.com/example/my-app-manifests.git
-```
-
-### 2. Create a Placement
-
-```yaml
-apiVersion: cluster.open-cluster-management.io/v1beta1
-kind: Placement
-metadata:
-  name: my-app-placement
-  namespace: my-app-ns
-spec:
-  predicates:
-    - requiredClusterSelector:
-        labelSelector:
-          matchLabels:
-            cluster.open-cluster-management.io/clusterset: dr-clusters
-  # Ramen will manage the cluster selection via PlacementDecision
-```
-
-### 3. Create a Subscription
-
-```yaml
-apiVersion: apps.open-cluster-management.io/v1
-kind: Subscription
-metadata:
-  name: my-app-subscription
-  namespace: my-app-ns
-  annotations:
-    apps.open-cluster-management.io/git-path: deploy/
-    apps.open-cluster-management.io/git-branch: main
-spec:
-  channel: my-app-channel-ns/my-app-channel
-  placement:
-    placementRef:
-      kind: Placement
-      name: my-app-placement
-```
-
-### 4. Create a DRPlacementControl
-
-```yaml
-apiVersion: ramendr.openshift.io/v1alpha1
-kind: DRPlacementControl
-metadata:
-  name: my-app-drpc
-  namespace: my-app-ns
-spec:
-  preferredCluster: harv
-  drPolicyRef:
-    name: dr-policy
-  placementRef:
-    kind: Placement
-    name: my-app-placement
-  pvcSelector:
-    matchLabels:
-      app: my-app
-```
-
-### How It Works Together
-
-```
-1. Initial Deployment:
-   ┌─────────────────────────────────────────────────────────────────┐
-   │ Placement → PlacementDecision (cluster: harv)                   │
-   │     ↓                                                           │
-   │ Subscription controller sees PlacementDecision                  │
-   │     ↓                                                           │
-   │ Creates ManifestWork to deploy app on harv                      │
-   │     ↓                                                           │
-   │ DRPC creates VRG on harv (Primary) and marv (Secondary)         │
-   └─────────────────────────────────────────────────────────────────┘
-
-2. After Failover (action: Failover, failoverCluster: marv):
-   ┌─────────────────────────────────────────────────────────────────┐
-   │ DRPC promotes VRG on marv to Primary                            │
-   │     ↓                                                           │
-   │ DRPC updates PlacementDecision (cluster: marv)                  │
-   │     ↓                                                           │
-   │ Subscription controller detects PlacementDecision change        │
-   │     ↓                                                           │
-   │ Deletes ManifestWork for harv, creates ManifestWork for marv    │
-   │     ↓                                                           │
-   │ App automatically deployed on marv ✓                            │
-   └─────────────────────────────────────────────────────────────────┘
-```
-
-### Verifying Subscription Setup
-
-```bash
-# Check Channel
-kubectl get channel -A
-
-# Check Subscription
-kubectl get subscription -n my-app-ns
-
-# Check Placement and PlacementDecision
-kubectl get placement -n my-app-ns
-kubectl get placementdecision -n my-app-ns
-
-# After failover, verify PlacementDecision was updated
-kubectl get placementdecision -n my-app-ns -o yaml | grep -A5 decisions
-```
-
-### Required OCM Components (Subscription Model Only)
-
-The OCM Subscription model requires the full OCM runtime. If using OTS with ArgoCD, Fleet, or ManifestWork deployment models, these components are **not needed**.
 
 ---
 
@@ -919,21 +714,22 @@ The OCM Subscription model requires the full OCM runtime. If using OTS with Argo
 
 ## S3 Storage Usage
 
-Ramen uses S3 for storing DR metadata. The bucket structure:
+Ramen uses S3 for storing DR metadata. Objects are gzipped JSON. The key structure:
 
 ```
-s3://ramen/
-├── <cluster-id>/
-│   └── vrg/
-│       └── <namespace>/
-│           └── <vrg-name>/
-│               ├── pvc-<name>.json      # PVC metadata
-│               └── vrg-status.json      # VRG status
+s3://<bucket>/
+└── <namespace>/<vrg-name>/
+    ├── <api-type>.VolumeReplicationGroup/a       # VRG status
+    ├── v1.PersistentVolume/<pv-name>             # PV metadata
+    ├── v1.PersistentVolumeClaim/<ns>%2F<name>    # PVC metadata
+    └── kube-objects/<capture-number>/...          # Protected kube objects
 ```
+
+The `<api-type>` for VRG is the fully-qualified Go type name (e.g., `github.com/ramendr/ramen/api/v1alpha1.VolumeReplicationGroup`). The suffix `a` is a fixed identifier (`vrgS3ObjectNameSuffix`).
 
 This allows:
 - Cross-cluster coordination without direct connectivity
-- Recovery of PVC metadata during failover
+- Recovery of PV/PVC metadata during failover (storage bindings, access modes, capacity)
 - Audit trail of DR operations
 
 ---
@@ -1101,7 +897,7 @@ kubectl describe replicationsource -n <namespace> <name>
 
 | Component | Version | Notes |
 |-----------|---------|-------|
-| Ramen OTS Controller | latest | Fulfills ManifestWork + MCV via kubeconfig |
+| Ramen OTS Controller | dev | Fulfills ManifestWork + MCV via kubeconfig |
 | Ramen | dev | Built from source |
 | VolSync | 0.10.x | Helm chart |
 | Longhorn | 1.7.x | Bundled with Harvester |
