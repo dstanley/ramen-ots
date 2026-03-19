@@ -21,7 +21,7 @@ using server-side apply, manages lifecycle with finalizers, and reports status
 conditions (Applied, Available, Degraded).
 
 **ManagedClusterView** — Reads a specified resource from a managed cluster and
-returns the result in the CR status. Polls every 10 seconds to keep status
+returns the result in the CR status. Polls every 15 seconds to keep status
 current during DR operations.
 
 **Fleet PlacementDecision** (optional) — Watches PlacementDecision resources
@@ -123,10 +123,12 @@ go run ./cmd/ \
 
 ## Integration with Ramen
 
-This controller is designed to work with Ramen's `ClusterManagementDisabled`
-mode (proposed). When enabled, Ramen continues creating ManifestWork and MCV
-CRs but does not expect OCM agents on managed clusters. This controller
-fulfills those CRs instead.
+This controller works alongside an unmodified Ramen hub operator. Ramen creates
+ManifestWork and MCV CRs as part of its normal DR operations. Instead of OCM
+agents fulfilling those CRs on managed clusters, this controller fulfills them
+directly from the hub using kubeconfig-based access. Ramen's OCM CRDs must
+still be installed, but no OCM runtime components (hub controllers, klusterlet
+agents) are required.
 
 Key compatibility details:
 - ManifestWork status must report `Applied=True`, `Available=True`,
