@@ -200,7 +200,12 @@ done
 
 ## 9. Deploy DR Cluster Operator on Managed Clusters
 
-Installs the cluster operator on to the downstream Harvester (or RKE2) nodes.
+The DR cluster operator runs on each managed cluster and handles the data plane
+for disaster recovery. It reconciles VolumeReplicationGroup (VRG) resources
+deployed by the hub (via ManifestWork/OTS), manages VolSync
+ReplicationSource/ReplicationDestination lifecycle, handles PVC snapshot and
+restore during failover, and reports protection status back to the hub.
+
 Run these commands from the **ramen** repo root.
 
 ```bash
