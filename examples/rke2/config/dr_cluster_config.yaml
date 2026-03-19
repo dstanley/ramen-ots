@@ -17,6 +17,13 @@ leaderElection:
   resourceName: dr-cluster.ramendr.openshift.io
 ramenControllerType: "dr-cluster"
 maxConcurrentReconciles: 50
+volumeUnprotectionEnabled: true
+
+# Admin namespace for discovered apps (disapp) with cross-namespace protection
+ramenOpsNamespace: ramen-ops
+multiNamespace:
+  FeatureEnabled: true
+  volsyncSupported: true
 
 # VolSync configuration for Longhorn-based replication
 # Note: cephFSCSIDriverName is not needed for Longhorn

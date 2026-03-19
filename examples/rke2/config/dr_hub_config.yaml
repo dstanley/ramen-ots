@@ -18,6 +18,12 @@ leaderElection:
 ramenControllerType: "dr-hub"
 maxConcurrentReconciles: 50
 
+# Admin namespace for discovered apps (disapp) with cross-namespace protection
+ramenOpsNamespace: ramen-ops
+multiNamespace:
+  FeatureEnabled: true
+  volsyncSupported: true
+
 # S3 store profiles for backup storage
 # Configure with your S3-compatible storage (MinIO, AWS S3, etc.)
 s3StoreProfiles:
