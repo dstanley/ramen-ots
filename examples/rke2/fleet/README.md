@@ -4,15 +4,24 @@ This directory contains scripts and manifests for setting up Rancher Fleet with 
 
 ## Overview
 
-When using Fleet GitRepo with Ramen DR:
-1. `fleet-dr-controller.sh` watches PlacementDecision for cluster changes
-2. When Ramen updates PlacementDecision during failover/relocate:
-   - Controller updates `ramen.dr/fleet-enabled` label on Fleet Cluster resources
-   - Fleet detects label change on Cluster resource
-   - Fleet creates/removes BundleDeployment for the target cluster
-   - Fleet agent deploys/removes application resources
+The OTS controller includes a built-in Fleet PlacementDecision reconciler
+(enabled with `--enable-fleet-controller`) that watches PlacementDecision
+resources annotated with `ramen.dr/fleet-managed=true` and automatically
+manages Fleet Cluster labels during DR operations.
 
-This provides **fully automatic application failover** without manual intervention.
+When Ramen updates PlacementDecision during failover/relocate:
+1. The Fleet reconciler detects the change
+2. Sets `ramen.dr/fleet-enabled=true` on the target Fleet Cluster
+3. Removes the label from all other Fleet Clusters
+4. Fleet detects the label change and creates/removes BundleDeployments
+5. Fleet agent deploys/removes application resources on managed clusters
+
+This provides **fully automatic application failover** without manual
+intervention.
+
+> **Note:** This replaces the earlier `fleet-dr-controller.sh` shell script,
+> which polled PlacementDecision on a timer. The built-in controller uses
+> native Kubernetes watches for immediate response.
 
 ## Fleet Cluster Naming
 
@@ -64,20 +73,22 @@ kubectl get clusters.fleet.cattle.io -n fleet-default --context rke2
 
 ## Usage
 
-### Start the DR Controller
+### Enable the Fleet Controller
 
-The controller manages Fleet cluster labels based on PlacementDecision changes:
+The Fleet PlacementDecision controller is built into the OTS binary and enabled
+via the `--enable-fleet-controller` flag. The default deployment manifest
+(`scripts/deploy/deployment.yaml`) already includes this flag.
 
-```bash
-# Start controller (runs in foreground)
-./fleet-dr-controller.sh
+Configuration flags:
 
-# Or run in background
-nohup ./fleet-dr-controller.sh > /tmp/fleet-dr-controller.log 2>&1 &
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--enable-fleet-controller` | `false` | Enable the Fleet PlacementDecision controller |
+| `--fleet-label-key` | `ramen.dr/fleet-enabled` | Label key set on Fleet Cluster resources |
+| `--fleet-namespace` | `fleet-default` | Namespace where Fleet Cluster resources are located |
 
-# With custom options
-./fleet-dr-controller.sh --namespace ramen-test --placement rto-rpo-test-placement
-```
+PlacementDecision resources must be annotated with `ramen.dr/fleet-managed=true`
+for the controller to process them.
 
 ### Deploy Application with Fleet
 
@@ -88,10 +99,7 @@ nohup ./fleet-dr-controller.sh > /tmp/fleet-dr-controller.log 2>&1 &
 # 2. Apply the GitRepo (if not already applied)
 kubectl apply -f gitrepo.yaml --context rke2
 
-# 3. Start the DR controller if not already running
-./fleet-dr-controller.sh &
-
-# 4. Check Fleet BundleDeployments
+# 3. Check Fleet BundleDeployments
 kubectl get bundledeployments -n fleet-default --context rke2
 ```
 
@@ -107,7 +115,7 @@ kubectl patch drpc rto-rpo-test-drpc -n ramen-test --context rke2 \
 ```
 
 When PlacementDecision changes:
-1. Controller detects change and relabels Fleet clusters
+1. OTS Fleet reconciler detects change and relabels Fleet clusters
 2. Fleet removes BundleDeployment from source cluster
 3. Fleet creates BundleDeployment for target cluster
 4. Fleet agent deploys app to target cluster
@@ -119,7 +127,7 @@ When PlacementDecision changes:
 ```
 
 Fleet handles relocate automatically:
-1. When PlacementDecision becomes empty (during quiesce), controller unlabels all clusters
+1. When PlacementDecision becomes empty (during quiesce), the reconciler unlabels all clusters
 2. Fleet removes the app, freeing the PVC for final sync
 3. When PlacementDecision points to new cluster, controller labels it
 4. Fleet deploys app to new cluster
@@ -145,7 +153,7 @@ Fleet **must not** deploy the PVC. Ramen manages PVC lifecycle during DR operati
 | File | Description |
 |------|-------------|
 | `setup-fleet.sh` | Script to verify Fleet installation and discover clusters |
-| `fleet-dr-controller.sh` | Controller that manages cluster labels based on PlacementDecision |
+| `fleet-dr-controller.sh` | Legacy shell-based controller (superseded by built-in Fleet reconciler) |
 | `gitrepo.yaml` | Fleet GitRepo resource targeting labeled clusters |
 | `../test-app/fleet.yaml` | Fleet bundle configuration (namespace, deployment settings) |
 | `../test-app/.fleetignore` | Excludes PVC and non-app files from Fleet deployment |
@@ -248,7 +256,7 @@ kubectl get clusters.fleet.cattle.io -n fleet-default --context rke2 -o wide
 |       ^                     |                             |                  |
 |       |                     |                             |                  |
 |       |                     v                             v                  |
-|  +----+------------+  fleet-dr-controller    +------------------------+      |
+|  +----+------------+  OTS Fleet reconciler   +------------------------+      |
 |  |DRPlacementControl|  detects change,       | BundleDeployment       |      |
 |  |(controls DR)     |  labels Fleet cluster  | (for labeled cluster)  |      |
 |  +------------------+                        +-----------+------------+      |

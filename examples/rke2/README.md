@@ -3,11 +3,6 @@
 Example configurations and scripts for running Ramen disaster recovery across
 RKE2/Harvester clusters using VolSync and Longhorn.
 
-This example uses an experimental [Ramen OTS controller](https://github.com/dstanley/ramen-ots)
-to fulfill OCM ManifestWork and ManagedClusterView CRs without requiring OCM
-runtime components. The approach is informed by Martin Jackson's
-[ramendr-analysis](https://github.com/mhjacks/ramendr-analysis), which examines
-Ramen's OCM dependencies and proposes abstractions for decoupling them.
 
 ## Documentation
 
@@ -33,6 +28,7 @@ rke2/
     dr-status.sh               # Check DR status
     dr-failover.sh             # Execute failover
     dr-relocate.sh             # Execute relocation
+    dr-cycle-test.sh           # DR cycle soak test (failover/relocate loop)
   test-app/                    # Sample DR-protected application manifests
   argocd/                      # ArgoCD integration (ApplicationSet + DR controller)
   fleet/                       # Rancher Fleet integration (GitRepo + DR controller)

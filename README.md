@@ -1,8 +1,13 @@
 # Ramen OTS Controller
 
-A Kubernetes controller that implements the OCM Object Transport System (OTS)
+An experimental Kubernetes controller that implements the OCM Object Transport System (OTS)
 interface for Ramen DR, enabling disaster recovery without requiring OCM
 runtime components.
+
+The approach is informed by Martin Jackson's
+[ramendr-analysis](https://github.com/mhjacks/ramendr-analysis), which examines
+Ramen's OCM dependencies and proposes abstractions for decoupling them.
+
 
 ## What It Does
 
@@ -19,6 +24,13 @@ conditions (Applied, Available, Degraded).
 returns the result in the CR status. Polls every 10 seconds to keep status
 current during DR operations.
 
+**Fleet PlacementDecision** (optional) — Watches PlacementDecision resources
+annotated with `ramen.dr/fleet-managed=true` and syncs labels on Rancher Fleet
+Cluster resources. When Ramen updates the PlacementDecision during failover or
+relocate, this controller sets `ramen.dr/fleet-enabled=true` on the target
+Fleet Cluster and removes it from all others, causing Fleet to redeploy the
+application to the correct cluster. Enabled with `--enable-fleet-controller`.
+
 ## Architecture
 
 ```
@@ -29,17 +41,18 @@ Hub Cluster
 │
 └── Ramen OTS Controller
     ├── ManifestWork reconciler  → applies resources to managed cluster
-    └── MCV reconciler           → reads resources from managed cluster
-        │
-        └── Cluster Registry
-            ├── Reads kubeconfig from Secret: <cluster>-kubeconfig
-            └── Fallback: kubeconfig context matching cluster name
+    ├── MCV reconciler           → reads resources from managed cluster
+    ├── Fleet reconciler (opt)   → syncs PlacementDecision to Fleet labels
+    │
+    └── Cluster Registry
+        ├── Reads kubeconfig from Secret: <cluster>-kubeconfig
+        └── Fallback: kubeconfig context matching cluster name
 ```
 
 ## Cluster Connectivity
 
 The controller resolves cluster names to API clients using kubeconfig Secrets
-stored on the hub cluster.
+stored on the **hub** cluster.
 
 ### Kubeconfig Secret Format
 
@@ -95,6 +108,9 @@ go run ./cmd/ \
 #   --fallback-kubeconfig    Kubeconfig file for dev/testing
 #   --metrics-bind-address   Metrics endpoint (default: :8080)
 #   --health-probe-bind-address  Health probe endpoint (default: :8081)
+#   --enable-fleet-controller    Enable Fleet PlacementDecision controller (default: false)
+#   --fleet-label-key            Label key on Fleet Clusters (default: ramen.dr/fleet-enabled)
+#   --fleet-namespace            Namespace for Fleet Cluster resources (default: fleet-default)
 ```
 
 ## Prerequisites
