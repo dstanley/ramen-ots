@@ -894,37 +894,6 @@ If Relocate is stuck at `RunningFinalSync`:
      --type=merge -p '{"spec":{"runFinalSync":true},"status":{"finalSyncComplete":true}}'
    ```
 
-## Known Issues and Bugs
-
-### VRG PVC Finalizer Not Removed Before Deletion (Ramen Bug - Fixed)
-
-**Issue:** During Relocate, when `ensurePVCFromSnapshot()` detects a PVC with an incorrect datasource and attempts to delete and recreate it from a VolumeSnapshot, the PVC gets stuck in `Terminating` state indefinitely.
-
-**Root Cause:** `ensurePVCFromSnapshot()` in `vshandler.go` calls `v.client.Delete(pvc)` without first removing the Ramen-owned finalizer `volumereplicationgroups.ramendr.openshift.io/pvc-volsync-protection`. Kubernetes honors the finalizer and blocks deletion. No other code path removes the finalizer for this scenario.
-
-**Fix:** Remove the `pvc-volsync-protection` finalizer before issuing the delete call in `ensurePVCFromSnapshot()`. This follows the same pattern already used in `cleanupPVCFromSnapshot()`.
-
-**Workaround (if running unfixed Ramen):** Manually remove the finalizer:
-```bash
-kubectl patch pvc <pvc-name> -n <namespace> -p '{"metadata":{"finalizers":null}}' --type=merge
-```
-
-### Application Lifecycle Controller Gap
-
-**Issue:** During Relocate operations, the application must be quiesced (stopped) on the source cluster BEFORE VRG can run the final sync. However:
-
-1. PlacementDecision only changes AFTER final sync completes
-2. If you only watch PlacementDecision, you can't know to remove the app early
-3. This creates a deadlock: final sync needs PVC deleted, but app is using PVC
-
-**Root Cause:** In a full ACM setup with Subscriptions, the Application Lifecycle controller would handle this. With manual ManifestWorks, there's no mechanism to detect "Relocate initiated" vs "Relocate completed".
-
-**Workaround:** The app controller must watch BOTH:
-1. **DRPC status.phase** (intent) - to detect `Relocating` phase and quiesce app early
-2. **PlacementDecision** (state) - to deploy app when placement changes
-
-See the "DRPC-Aware App Controller" section below for implementation.
-
 ## DRPC-Aware App Controller
 
 > **Note:** This section applies only to the **ManifestWork deployment model**.
