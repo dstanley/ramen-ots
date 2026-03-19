@@ -4,7 +4,7 @@ This document describes the architecture and components involved in running Rame
 
 ## Overview
 
-Ramen provides application-level disaster recovery for Kubernetes workloads across multiple clusters. It uses OCM (Open Cluster Management) CRDs as the multi-cluster API layer, with the OTS controller fulfilling ManifestWork and ManagedClusterView CRs via direct kubeconfig access to managed clusters.
+[Ramen](https://github.com/RamenDR/ramen) provides application-level disaster recovery for Kubernetes workloads across multiple clusters. It uses OCM (Open Cluster Management) CRDs as the multi-cluster API layer, with the OTS controller fulfilling ManifestWork and ManagedClusterView CRs via direct kubeconfig access to managed clusters.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
