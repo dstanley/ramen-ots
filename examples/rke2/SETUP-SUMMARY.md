@@ -345,6 +345,140 @@ KUBECONFIG=/path/to/harv_kubeconfig.yaml subctl diagnose all
 
 Expected output shows connected gateways with low latency (~4ms for local network).
 
+## 10c. Install Velero (Optional)
+
+Velero provides Kubernetes object protection (kube object protection) for
+Ramen DR. When enabled, Ramen backs up and restores Kubernetes resources
+(Deployments, ConfigMaps, Secrets, etc.) in addition to PVC data during
+failover and relocate operations. Without Velero, only PVC data is
+replicated via VolSync.
+
+Velero is required if the DR cluster operator config includes
+`kubeObjectProtection` (see `dr_cluster_config.yaml`). If you don't need
+kube object protection, remove the `kubeObjectProtection` section from
+the config and skip this step.
+
+### Install Velero on Each Managed Cluster
+
+Velero must be installed on every managed cluster that participates in DR.
+The S3 backend can be the same MinIO instance used by Ramen (deployed in
+step 4), but requires a separate bucket.
+
+#### Create MinIO Bucket for Velero
+
+```bash
+kubectl -n minio-system run mc-create-bucket --rm -it --restart=Never \
+  --image=minio/mc:RELEASE.2023-01-28T20-29-38Z \
+  --command -- /bin/sh -c "mc alias set myminio http://minio.minio-system.svc.cluster.local:9000 minioadmin minioadmin && mc mb --ignore-existing myminio/velero"
+```
+
+#### Prepare Values File
+
+Create a `velero-values.yaml` with your S3 configuration. The `s3Url`
+must be reachable from managed clusters (use a NodePort or LoadBalancer
+IP, not a cluster-internal service DNS):
+
+```yaml
+credentials:
+  secretContents:
+    cloud: |
+      [default]
+      aws_access_key_id = minioadmin
+      aws_secret_access_key = minioadmin
+
+snapshotsEnabled: false
+
+configuration:
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: velero
+      default: true
+      config:
+        region: us-east-1
+        s3ForcePathStyle: "true"
+        s3Url: "http://<hub-node-ip>:<minio-nodeport>"
+        checksumAlgorithm: ""
+```
+
+**Note:** The `aws` provider is the S3 protocol plugin name — it works
+with any S3-compatible backend (MinIO, Ceph RGW, etc.), not just AWS.
+
+#### Option A: Community Velero (vmware-tanzu)
+
+```bash
+helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+
+for cluster in harv marv; do
+  echo "=== Installing Velero on $cluster ==="
+  kubie exec $cluster default helm install velero vmware-tanzu/velero \
+    --namespace velero --create-namespace \
+    --values velero-values.yaml
+done
+```
+
+#### Option B: SUSE Application Collection
+
+If using SUSE Rancher, Velero is available from the Application
+Collection registry (`dp.apps.rancher.io`). The chart pulls anonymously
+but container images require an `application-collection` pull secret.
+
+```bash
+for cluster in harv marv; do
+  echo "=== Installing Velero on $cluster ==="
+
+  # Create image pull secret (use your AppCo credentials)
+  kubie exec $cluster default kubectl create namespace velero --dry-run=client -o yaml | \
+    kubie exec $cluster default kubectl apply -f -
+  kubie exec $cluster default kubectl create secret docker-registry application-collection \
+    --namespace velero \
+    --docker-server=dp.apps.rancher.io \
+    --docker-username='<your-email>' \
+    --docker-password='<your-appco-token>'
+
+  # Install chart with SUSE-specific values
+  kubie exec $cluster default helm install velero \
+    oci://dp.apps.rancher.io/charts/velero \
+    --namespace velero --create-namespace \
+    --set global.imagePullSecrets='{application-collection}' \
+    --set image.registry=dp.apps.rancher.io \
+    --values velero-values.yaml
+done
+```
+
+**Note:** SUSE images use tags without the `v` prefix (e.g., `1.13.1`
+not `v1.13.1`). If adding the AWS plugin as an initContainer, use the
+SUSE image path:
+```yaml
+initContainers:
+  - name: velero-plugin-for-aws
+    image: dp.apps.rancher.io/containers/velero-plugin-for-aws:1.13.1
+```
+
+### Verify Installation
+
+```bash
+for cluster in harv marv; do
+  echo "=== $cluster ==="
+  kubie exec $cluster default kubectl get pods -n velero
+  kubie exec $cluster default kubectl get backupstoragelocation -n velero
+done
+```
+
+The Velero pod should be `Running` and the BackupStorageLocation should
+show `Phase: Available`.
+
+### Restart DR Cluster Operators
+
+After installing Velero, restart the DR cluster operator on each managed
+cluster so it detects Velero:
+
+```bash
+for cluster in harv marv; do
+  kubie exec $cluster default kubectl rollout restart deployment -n ramen-system ramen-dr-cluster-operator
+done
+```
+
 ## 11. Create ClusterClaim Resources on Managed Clusters
 
 Each managed cluster needs a ClusterClaim to identify itself:
@@ -563,6 +697,23 @@ subctl join broker-info.subm \
   --servicecidr <service-cidr>
 ```
 
+### VRG Stuck Because Velero Not Installed
+
+**Symptom:** DR cluster operator logs show:
+```
+VRG {ramen-ops/disapp-deploy-longhorn} with kube object protection doesn't work if velero/oadp is not installed. Please install velero/oadp and restart the operator
+```
+
+**Cause:** The DR cluster config has `kubeObjectProtection` enabled but Velero is not installed on the managed cluster.
+
+**Fix:** Either install Velero (see step 10c) or remove `kubeObjectProtection` from the DR cluster config:
+```bash
+# Remove kubeObjectProtection from the configmap
+kubectl edit configmap ramen-dr-cluster-operator-config -n ramen-system
+# Then restart the operator
+kubectl rollout restart deployment -n ramen-system ramen-dr-cluster-operator
+```
+
 ### VRG Not Finding PVCs After Failover (created-by-ramen label) (Ramen Bug - Fixed)
 
 After failover or relocate, the VRG on the new primary cluster shows "No PVCs are protected using Volsync scheme" even though PVCs exist. `DataProtected` never becomes `True`.
@@ -716,6 +867,9 @@ The initial PVC should be created separately (e.g., via ManifestWork or the `dem
 │                              │    │                              │
 │  volsync-system:             │    │  volsync-system:             │
 │    - volsync                 │    │    - volsync                 │
+│                              │    │                              │
+│  velero: (optional)          │    │  velero: (optional)          │
+│    - velero (kube obj prot.) │    │    - velero (kube obj prot.) │
 │                              │    │                              │
 │  longhorn-system:            │    │  longhorn-system:            │
 │    - longhorn (CSI storage)  │    │    - longhorn (CSI storage)  │
