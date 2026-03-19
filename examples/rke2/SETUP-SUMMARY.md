@@ -363,6 +363,19 @@ kubie exec marv default kubectl get clusterclaim
 
 ## 12. Create DRCluster and DRPolicy Resources
 
+**DRCluster** represents a managed cluster that participates in DR. It
+references the cluster name, S3 profile for metadata storage, and the
+replication scheduling interval. When created, Ramen validates connectivity
+by deploying a DRClusterConfig to the managed cluster (via ManifestWork/OTS)
+and reading back storage class and ClusterClaim information (via MCV).
+
+**DRPolicy** defines a DR relationship between two or more DRClusters. It
+specifies which clusters can protect each other and the replication schedule
+(e.g., every 5 minutes). During validation, Ramen reads the `id.k8s.io`
+ClusterClaim and storage class labels from each cluster to build peer class
+mappings -- matching StorageClasses across clusters by their `storageid` labels
+to determine whether to use sync or async (VolSync) replication.
+
 On the hub cluster:
 
 ```bash
