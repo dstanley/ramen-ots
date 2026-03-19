@@ -270,7 +270,17 @@ done
 
 ## 10b. Install Submariner (Optional but Recommended)
 
-Submariner provides secure cross-cluster networking. Without it, VolSync uses LoadBalancer services which may not work in all environments.
+Submariner provides secure cross-cluster networking via encrypted gateway
+tunnels (IPsec/WireGuard). VolSync's rsync-tls replication requires network
+connectivity between clusters. With Submariner, Ramen creates ServiceExport
+resources that make ReplicationDestination services reachable at
+`*.svc.clusterset.local` across clusters. Without Submariner, VolSync falls
+back to LoadBalancer services, which may not work in environments such as:
+
+- **Bare metal / Harvester** — no LoadBalancer provider without MetalLB or kube-vip
+- **Isolated subnets** — clusters on different VLANs with no routed path between them
+- **NAT / firewall boundaries** — clusters in separate datacenters or VPCs where
+  LoadBalancer IPs are not externally reachable
 
 ### Install subctl CLI
 
