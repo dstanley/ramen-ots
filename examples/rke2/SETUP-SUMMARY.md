@@ -23,28 +23,26 @@ export HUB_API=https://hub.example.com:6443 # Hub cluster API server URL
 
 The examples use `harv` and `marv` as managed cluster names — substitute your own cluster names.
 
-## 1. Build Ramen Operator Image 
-
-### Build for amd64 (from Apple Silicon Mac if needed)
+## 1. Build OTS Controller Image
 
 ```bash
-# Enable Rosetta in Rancher Desktop
+# Native build (x86 Linux or amd64 Docker)
+docker build -t $REGISTRY/ramen-ots:dev --load .
+
+# Cross-compile for amd64 from Apple Silicon Mac (requires Rosetta in Rancher Desktop)
 rdctl set --virtual-machine.type=vz
 rdctl set --virtual-machine.use-rosetta
-
-# Restart Rancher Desktop
 rdctl shutdown && sleep 2 && open -a "Rancher Desktop" && sleep 30
-
-# Build for amd64
-docker buildx build --platform linux/amd64 -t $REGISTRY/ramen-ots:latest --load .
+docker buildx build --platform linux/amd64 -t $REGISTRY/ramen-ots:dev --load .
 ```
 
 ### Push to Registry (with self-signed cert)
 
 ```bash
 # Used skopeo to bypass TLS issues (test lab)
-
-docker save ramen-ots:latest -o ramen-ots.tar                                                                                                  skopeo copy --dest-tls-verify=false docker-archive:ramen-ots.tar docker://$REGISTRY/ramen-ots:latest                                           rm ramen-ots.tar                 
+docker save ramen-ots:dev -o ramen-ots.tar
+skopeo copy --dest-tls-verify=false docker-archive:ramen-ots.tar docker://$REGISTRY/ramen-ots:dev
+rm ramen-ots.tar
 ```
 
 
@@ -56,7 +54,7 @@ The OTS (Object Transport System) controller replaces OCM runtime components (kl
 # Run the setup script from the repo (installs CRDs, creates ManagedCluster CRs, deploys controller)
 ./examples/rke2/scripts/setup-ots.sh --clusters harv,marv \
   --kubeconfig ~/.kube/config \
-  --image $REGISTRY/ramen-ots:latest
+  --image $REGISTRY/ramen-ots:dev
 
 # Verify
 kubectl get deployment -n ramen-ots-system
@@ -68,6 +66,11 @@ The setup script handles:
 2. Creating ManagedCluster namespaces and CRs with proper status conditions
 3. Creating kubeconfig secrets for managed cluster access
 4. Deploying the OTS controller
+
+The default deployment manifest enables the Fleet PlacementDecision controller
+(`--enable-fleet-controller`), which syncs PlacementDecision changes to Fleet
+Cluster labels for automatic application failover. See the
+[Fleet README](fleet/README.md) for details.
 
 ## 3. Deploy Ramen Hub Operator
 
@@ -148,12 +151,26 @@ kubectl logs -n ramen-ots-system deployment/ramen-ots-controller
 Expected output:
 ```
 NAME   HUB ACCEPTED   MANAGED CLUSTER URLS   JOINED   AVAILABLE   AGE
-harv   true                                  True     True        10m
-marv   true                                  True     True        6m
+harv   true                                  True     Unknown     10m
+marv   true                                  True     Unknown     6m
 ```
 
-## 7. Check Harvester Nodes have access to registry
+`Available=Unknown` is expected in OTS mode. The OCM agent that normally
+heartbeats to set `Available=True` is not running. Ramen does not gate on
+this condition.
 
+## 7. Verify Managed Clusters Can Pull From Registry
+
+Ensure each Harvester node can reach the container registry. If using a
+self-signed certificate, add it to each node's trusted store or configure
+containerd to skip TLS verification for the registry host.
+
+```bash
+for cluster in harv marv; do
+  kubie exec $cluster default kubectl run registry-check --rm -it --restart=Never \
+    --image=$REGISTRY/ramen-ots:dev -- echo "pull OK"
+done
+```
 
 ## 8. Install Required CRDs on Managed Clusters
 
@@ -162,6 +179,8 @@ Ramen requires several CRDs on managed clusters for the DR cluster operator to f
 ### 8.1 CSI Addon CRDs
 
 Only the VolumeReplication and VolumeReplicationClass CRDs are strictly required — the DR cluster operator will crash without them. The remaining CRDs are optional: VolumeGroupReplication and VolumeGroupSnapshot CRDs enable consistency group support for multi-PVC applications, while NetworkFenceClass and CSIAddonsNode enable storage-level network fencing for shared storage backends (e.g., Dell PowerFlex, Ceph/RBD). We install all of them since they are harmless if unused and avoid debugging missing-CRD issues later.
+
+Run the following from the **ramen** repo root (the CRD files live in `hack/test/`):
 
 ```
 for cluster in harv marv; do
@@ -181,7 +200,8 @@ done
 
 ## 9. Deploy DR Cluster Operator on Managed Clusters
 
-Installs the cluster operator on to the downstream harvester (or RKE2) nodes.
+Installs the cluster operator on to the downstream Harvester (or RKE2) nodes.
+Run these commands from the **ramen** repo root.
 
 ```bash
 # On harv
@@ -350,7 +370,7 @@ True
 
 ```bash
 # Hub cluster
-kubectl get managedclusters                    # Both should be Available=True
+kubectl get managedclusters                    # Both Joined=True, Available=Unknown (expected for OTS)
 kubectl get deployment -n ramen-ots-system     # OTS controller running
 kubectl get drcluster                          # Both should exist
 kubectl get drpolicy                           # Should exist
@@ -648,7 +668,7 @@ The initial PVC should be created separately (e.g., via ManifestWork or the `dem
 │                           Hub Cluster (RKE2)                            │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  ramen-ots-system:                                                      │
-│    - ramen-ots-controller  (fulfills ManifestWork + MCV via kubeconfig) │
+│    - ramen-ots-controller  (ManifestWork + MCV + Fleet label sync)      │
 │                                                                         │
 │  ramen-system:                                                          │
 │    - ramen-hub-operator                                                 │
@@ -879,6 +899,10 @@ See the "DRPC-Aware App Controller" section below for implementation.
 
 ## DRPC-Aware App Controller
 
+> **Note:** This section applies only to the **ManifestWork deployment model**.
+> When using **Fleet** or **ArgoCD**, application lifecycle is handled
+> automatically and this controller is not needed.
+
 For testing RTO/RPO with manual ManifestWorks, use a controller that watches both DRPC status and PlacementDecision:
 
 ```bash
@@ -984,11 +1008,11 @@ Test environment: RKE2 hub + 2 Harvester clusters, VolSync rsync-tls over Submar
 #### Failover (harv → marv)
 - **RTO**: ~30 seconds (from DRPC Failover trigger to DRPC Completed)
 - **RPO**: Based on VolSync sync interval (default: 5m)
-- Fleet DR controller relabels Fleet clusters, Fleet automatically deploys app to target
+- OTS Fleet reconciler relabels Fleet clusters, Fleet automatically deploys app to target
 
 #### Relocate (marv → harv)
 - **RTO**: ~115 seconds (includes graceful quiesce and final sync)
 - **RPO**: Zero (final sync completes before cutover)
-- Fleet DR controller unlabels all clusters during quiesce, Fleet removes app freeing PVC for final sync
+- OTS Fleet reconciler unlabels all clusters during quiesce, Fleet removes app freeing PVC for final sync
 
 **Note:** RPO depends on VolSync schedulingInterval configured in DRPolicy (default: 5m). RTO depends on PVC restore time, app startup time, and deployment model. ArgoCD and Fleet provide fastest failover since app deployment is fully automatic.
