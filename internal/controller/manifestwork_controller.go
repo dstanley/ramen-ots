@@ -15,7 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	ocmworkv1 "open-cluster-management.io/api/work/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -26,7 +26,6 @@ const (
 	manifestWorkFinalizer       = "ramen-ots.ramendr.openshift.io/manifestwork-cleanup"
 	ocmManifestWorkFinalizer    = "cluster.open-cluster-management.io/manifest-work-cleanup"
 	legacyManifestWorkFinalizer = "rancher-ots.ramendr.openshift.io/manifestwork-cleanup"
-	fieldManager                = "ramen-ots"
 	manifestHashAnnotation      = "ramen-ots.io/manifest-hash"
 )
 
@@ -158,28 +157,17 @@ func (r *ManifestWorkReconciler) applyManifests(
 			return fmt.Errorf("unmarshaling manifest %d: %w", i, err)
 		}
 
+		// Remove "status" — Ramen embeds a stub status in VRG manifests that
+		// contains null fields (e.g. lastUpdateTime: null), causing CRD
+		// validation failures.
+		delete(obj.Object, "status")
+
 		gvk := obj.GroupVersionKind()
 		gvr := gvrFromGVK(gvk)
 
-		var resource = dc.Resource(gvr)
-
-		objData, err := json.Marshal(obj)
-		if err != nil {
-			return fmt.Errorf("marshaling object for apply: %w", err)
-		}
-
 		ns := obj.GetNamespace()
-		if ns != "" {
-			_, err = resource.Namespace(ns).Patch(ctx, obj.GetName(),
-				types.ApplyPatchType, objData,
-				metav1.PatchOptions{FieldManager: fieldManager, Force: boolPtr(true)})
-		} else {
-			_, err = resource.Patch(ctx, obj.GetName(),
-				types.ApplyPatchType, objData,
-				metav1.PatchOptions{FieldManager: fieldManager, Force: boolPtr(true)})
-		}
 
-		if err != nil {
+		if err := r.createOrUpdate(ctx, dc, gvr, ns, obj); err != nil {
 			return fmt.Errorf("applying %s %s/%s to cluster %s: %w",
 				gvk.Kind, ns, obj.GetName(), clusterName, err)
 		}
@@ -189,6 +177,128 @@ func (r *ManifestWorkReconciler) applyManifests(
 	}
 
 	return nil
+}
+
+// createOrUpdate creates the resource if it doesn't exist, or updates it by
+// replacing the spec from the desired manifest. This avoids SSA field ownership
+// issues where an empty struct (e.g. "volSync": {}) gets turned into null,
+// triggering CRD validation failures. With a regular Update, empty structs
+// remain as valid empty objects.
+//
+// After replacing the spec, fields managed exclusively by the managed cluster's
+// ramen-dr-cluster-operator (e.g. volSync.rsSpec) are preserved from the
+// existing object, since the hub never includes them in the ManifestWork.
+func (r *ManifestWorkReconciler) createOrUpdate(
+	ctx context.Context,
+	dc dynamic.Interface,
+	gvr schema.GroupVersionResource,
+	ns string,
+	desired *unstructured.Unstructured,
+) error {
+	var res dynamic.ResourceInterface
+	if ns != "" {
+		res = dc.Resource(gvr).Namespace(ns)
+	} else {
+		res = dc.Resource(gvr)
+	}
+
+	existing, err := res.Get(ctx, desired.GetName(), metav1.GetOptions{})
+	if k8serrors.IsNotFound(err) {
+		_, err = res.Create(ctx, desired, metav1.CreateOptions{})
+		return err
+	}
+	if err != nil {
+		return err
+	}
+
+	// Save fields managed by the local ramen-dr-cluster-operator before
+	// replacing the spec. These fields are never set by the hub in the
+	// ManifestWork and must survive spec replacement.
+	savedLocalFields := preserveLocalFields(existing)
+
+	// Replace spec entirely from the desired manifest. This ensures the hub's
+	// intent is fully applied (e.g. clearing volSync.rdSpec by setting
+	// volSync: {}) while preserving the existing object's metadata and status.
+	if desiredSpec, ok := desired.Object["spec"]; ok {
+		existing.Object["spec"] = desiredSpec
+	}
+
+	// Restore locally-managed fields into the replaced spec.
+	restoreLocalFields(existing, savedLocalFields)
+
+	// Merge labels and annotations from desired (additive, don't remove existing)
+	if labels := desired.GetLabels(); len(labels) > 0 {
+		merged := existing.GetLabels()
+		if merged == nil {
+			merged = map[string]string{}
+		}
+		for k, v := range labels {
+			merged[k] = v
+		}
+		existing.SetLabels(merged)
+	}
+	if annotations := desired.GetAnnotations(); len(annotations) > 0 {
+		merged := existing.GetAnnotations()
+		if merged == nil {
+			merged = map[string]string{}
+		}
+		for k, v := range annotations {
+			merged[k] = v
+		}
+		existing.SetAnnotations(merged)
+	}
+
+	_, err = res.Update(ctx, existing, metav1.UpdateOptions{})
+	return err
+}
+
+// localFields holds VRG spec fields managed by the ramen-dr-cluster-operator
+// on the managed cluster. The hub never sets these in the ManifestWork.
+type localFields struct {
+	rsSpec interface{} // spec.volSync.rsSpec — VolSync ReplicationSource specs
+}
+
+// preserveLocalFields extracts fields from the existing object that are
+// managed by the local ramen-dr-cluster-operator (not the hub).
+func preserveLocalFields(existing *unstructured.Unstructured) localFields {
+	var saved localFields
+	volSync, ok := nestedMap(existing.Object, "spec", "volSync")
+	if ok {
+		saved.rsSpec = volSync["rsSpec"]
+	}
+	return saved
+}
+
+// restoreLocalFields writes back locally-managed fields into the object after
+// spec replacement. Only restores fields that existed in the original object.
+func restoreLocalFields(obj *unstructured.Unstructured, saved localFields) {
+	if saved.rsSpec == nil {
+		return
+	}
+	spec, ok := obj.Object["spec"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	volSync, ok := spec["volSync"].(map[string]interface{})
+	if !ok {
+		// Create volSync map if the desired spec omitted it
+		volSync = map[string]interface{}{}
+		spec["volSync"] = volSync
+	}
+	volSync["rsSpec"] = saved.rsSpec
+}
+
+// nestedMap retrieves a nested map from an unstructured object by path keys.
+func nestedMap(obj map[string]interface{}, keys ...string) (map[string]interface{}, bool) {
+	current := obj
+	for _, key := range keys {
+		next, ok := current[key].(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		current = next
+	}
+	return current, true
 }
 
 func (r *ManifestWorkReconciler) deleteManifests(
@@ -316,6 +426,3 @@ func gvrFromGVK(gvk schema.GroupVersionKind) schema.GroupVersionResource {
 	}
 }
 
-func boolPtr(b bool) *bool {
-	return &b
-}
