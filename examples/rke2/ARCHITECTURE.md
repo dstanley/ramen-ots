@@ -64,7 +64,7 @@ The OTS controller replaces OCM runtime components by fulfilling ManifestWork an
 
 | Component | Description |
 |-----------|-------------|
-| **ramen-ots-controller** | Watches ManifestWork CRs and applies embedded resources to managed clusters via server-side apply. Watches ManagedClusterView CRs and reads resources from managed clusters, writing results to MCV status. |
+| **ramen-ots-controller** | Watches ManifestWork CRs and applies embedded resources to managed clusters via create-or-update with spec replacement. Watches ManagedClusterView CRs and reads resources from managed clusters, writing results to MCV status. Propagates VolSync PSK secrets and Velero S3 credentials to managed clusters. |
 
 The OTS controller uses kubeconfig secrets stored in the `ramen-ots-system` namespace (one per managed cluster: `<cluster-name>-kubeconfig`).
 
@@ -92,7 +92,7 @@ The Ramen hub operator runs on the hub cluster and manages DR at the policy leve
 |------------|---------|-----------------|---------|
 | **DRCluster Controller** | DRCluster | ManifestWork, ManagedClusterView | Validates clusters, deploys DRClusterConfig to managed clusters, reads cluster capabilities via MCV |
 | **DRPolicy Controller** | DRPolicy | - | Validates that referenced DRClusters are healthy and compatible |
-| **DRPlacementControl Controller** | DRPlacementControl | VolumeReplicationGroup (via ManifestWork), Policy (for VolSync secrets) | Orchestrates failover/relocate operations, propagates VolSync PSK secrets via OCM Policy |
+| **DRPlacementControl Controller** | DRPlacementControl | VolumeReplicationGroup (via ManifestWork) | Orchestrates failover/relocate operations. In OCM mode, propagates VolSync PSK secrets via OCM Policy; in OTS mode, the OTS controller handles secret propagation via ManifestWork. |
 
 #### Custom Resources (Hub)
 
@@ -192,7 +192,7 @@ Hub                                    Managed Cluster
  │ ─────────────────────────────────────────>│
  │                                           │
  │            OTS controller applies resources
- │            via kubeconfig + server-side apply
+ │            via kubeconfig + create-or-update
 ```
 
 **ManifestWork** is an OCM CRD that:
@@ -200,6 +200,26 @@ Hub                                    Managed Cluster
 2. Contains embedded Kubernetes resources to apply
 3. Is fulfilled by the OTS controller, which applies resources to the managed cluster via kubeconfig
 4. Status conditions are updated by the OTS controller (Applied, Available, Degraded)
+
+#### ManifestWork Apply Strategy
+
+The OTS controller uses a **create-or-update** strategy (not Server-Side Apply) to apply ManifestWork resources to managed clusters. This design was driven by a field ownership split in VolumeReplicationGroup (VRG) resources:
+
+**The problem with SSA:** Ramen's hub operator clears `volSync.rdSpec` by sending `volSync: {}` in the ManifestWork. With SSA, this empty struct gets interpreted as "release field ownership" and the field becomes `null`, causing CRD validation failures (`spec.volSync: Invalid value: "null"`).
+
+**VRG field ownership split:**
+- **Hub** (via ManifestWork): manages `volSync.rdSpec` (ReplicationDestination specs) and `volSync.disabled`
+- **Local ramen-dr-cluster-operator** (directly on VRG): manages `volSync.rsSpec` (ReplicationSource specs)
+
+**How create-or-update works:**
+1. **Get** the existing resource from the managed cluster
+2. **Save** locally-managed fields (`volSync.rsSpec`) from the existing object
+3. **Replace** the entire spec from the desired manifest (hub's intent)
+4. **Restore** locally-managed fields into the replaced spec
+5. **Merge** labels and annotations additively
+6. **Update** the resource
+
+This ensures the hub can clear `rdSpec` (by sending `volSync: {}`) while preserving `rsSpec` set by the local operator. For new resources, a simple Create is used.
 
 ### Managed Cluster to Hub (Pull via MCV)
 
@@ -890,6 +910,9 @@ kubectl describe replicationsource -n <namespace> <name>
 | Failover fails | S3 connectivity | Check S3 secret, bucket existence |
 | VolSync secret not found | ManifestWork not fulfilled | Check OTS controller logs for errors |
 | ReplicationDestination not created | PSK secret missing on secondary | `kubectl get secret <drpc>-vs-secret -n <ns> --context <cluster>` |
+| Namespace stuck Terminating | VolumeSnapshot finalizer blocking deletion | `kubectl get volumesnapshot -n <ns>`, patch finalizers to null |
+| Failover stuck, `lastGroupSyncTime: <nil>` | VolSync ReplicationSource not syncing | Check `kubectl get replicationsource -n <app-ns>` on new primary, verify rsSpec preserved on VRG |
+| Velero BSL Unavailable | vs3-secret missing on managed cluster | `kubectl get secret vs3-secret -n velero`, check OTS controller logs for velero-secret reconciler |
 
 ---
 

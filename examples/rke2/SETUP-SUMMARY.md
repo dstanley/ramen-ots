@@ -468,6 +468,24 @@ done
 The Velero pod should be `Running` and the BackupStorageLocation should
 show `Phase: Available`.
 
+### Velero S3 Credentials (Automatic)
+
+The OTS controller automatically propagates Velero S3 credentials (`vs3-secret`)
+to managed clusters when `kubeObjectProtection.veleroNamespaceName` is configured
+in the Ramen hub operator config. No manual secret creation is needed — the OTS
+Velero secret controller reads S3 credentials from the hub and creates the
+properly formatted Velero credential secret on each managed cluster via
+ManifestWork.
+
+Verify the secret was propagated:
+
+```bash
+for cluster in harv marv; do
+  echo "=== $cluster ==="
+  kubie exec $cluster default kubectl get secret vs3-secret -n velero
+done
+```
+
 ### Restart DR Cluster Operators
 
 After installing Velero, restart the DR cluster operator on each managed
@@ -753,6 +771,30 @@ kubectl patch pvc <pvc-name> -n <namespace> -p '{"metadata":{"finalizers":null}}
 
 Then recreate the namespace if needed for the secondary VRG.
 
+### Namespace Stuck Terminating Due to VolumeSnapshot Finalizer
+
+After DR cleanup, a namespace may be stuck Terminating because a VolumeSnapshot
+has a finalizer preventing deletion.
+
+**Symptom:** `kubectl get volumesnapshot -n <namespace>` shows a snapshot still
+present while the namespace is Terminating.
+
+**Cause:** Longhorn VolumeSnapshot or VolumeSnapshotContent finalizers prevent
+garbage collection when the underlying volume no longer exists (e.g. after
+failover moved the workload).
+
+**Fix:** Patch the finalizer off the VolumeSnapshot:
+```bash
+kubectl patch volumesnapshot <snapshot-name> -n <namespace> \
+  --type=merge -p '{"metadata":{"finalizers":null}}'
+```
+
+If a VolumeSnapshotContent is also stuck:
+```bash
+kubectl patch volumesnapshotcontent <content-name> \
+  --type=merge -p '{"metadata":{"finalizers":null}}'
+```
+
 ### VolSync PSK Secret Not Propagating to Managed Clusters
 
 The VolSync PSK secret is never created on managed clusters even though the DRPC is deployed.
@@ -880,7 +922,7 @@ The initial PVC should be created separately (e.g., via ManifestWork or the `dem
 
 The OTS controller on the hub fulfills both ManifestWork and ManagedClusterView CRs using direct kubeconfig access to managed clusters:
 
-1. **ManifestWork (push)**: OTS watches ManifestWork CRs, applies embedded resources to the target managed cluster via server-side apply, and updates status conditions
+1. **ManifestWork (push)**: OTS watches ManifestWork CRs, applies embedded resources to the target managed cluster via create-or-update, and updates status conditions
 2. **ManagedClusterView (pull)**: OTS watches MCV CRs, reads the specified resource from the managed cluster, and writes the result to MCV status
 
 No agents or addons are required on managed clusters. The OTS controller handles all hub-to-cluster communication.

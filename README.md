@@ -17,12 +17,20 @@ by OCM's work agent running on each managed cluster. This controller fulfills
 them directly from the hub using kubeconfig-based access.
 
 **ManifestWork** — Applies embedded Kubernetes resources to managed clusters
-using server-side apply, manages lifecycle with finalizers, and reports status
-conditions (Applied, Available, Degraded).
+using create-or-update with spec replacement, manages lifecycle with finalizers,
+and reports status conditions (Applied, Available, Degraded). Preserves fields
+managed by the local ramen-dr-cluster-operator (e.g. `volSync.rsSpec`).
 
 **ManagedClusterView** — Reads a specified resource from a managed cluster and
 returns the result in the CR status. Polls every 15 seconds to keep status
 current during DR operations.
+
+**Secret Propagator** — Watches VolSync PSK hub secrets and propagates them to
+managed clusters via ManifestWork.
+
+**Velero Secret Propagator** — Reads S3 credentials from the Ramen hub config
+and propagates Velero-formatted credentials (`vs3-secret`) to managed clusters
+for kube object protection via Velero BackupStorageLocations.
 
 **Fleet PlacementDecision** (optional) — Watches PlacementDecision resources
 annotated with `ramen.dr/fleet-managed=true` and syncs labels on Rancher Fleet
@@ -42,6 +50,8 @@ Hub Cluster
 └── Ramen OTS Controller
     ├── ManifestWork reconciler  → applies resources to managed cluster
     ├── MCV reconciler           → reads resources from managed cluster
+    ├── Secret propagator        → propagates VolSync PSK secrets
+    ├── Velero secret propagator → propagates Velero S3 credentials
     ├── Fleet reconciler (opt)   → syncs PlacementDecision to Fleet labels
     │
     └── Cluster Registry
