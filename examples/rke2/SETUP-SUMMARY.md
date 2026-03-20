@@ -195,8 +195,13 @@ for cluster in harv marv; do
   kubie exec $cluster default kubectl apply -f hack/test/groupsnapshot.storage.openshift.io_volumegroupsnapshots.yaml
   kubie exec $cluster default kubectl apply -f hack/test/networkfenceclasses.csiaddons.openshift.io.yaml
   kubie exec $cluster default kubectl apply -f hack/test/csiaddonsnodes.csiaddons.openshift.io.yaml
+  kubie exec $cluster default kubectl apply -f hack/test/recipes.ramendr.openshift.io.yaml
 done
 ```
+
+The Recipe CRD is required when kube object protection is enabled — the DR
+cluster operator uses Recipes to coordinate the order of resource capture and
+restore during Velero backup/restore operations.
 
 ## 9. Deploy DR Cluster Operator on Managed Clusters
 
