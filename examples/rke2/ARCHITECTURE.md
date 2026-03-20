@@ -42,6 +42,10 @@ Ramen's OCM dependencies and proposes abstractions for decoupling them.
 │  │  (Async Replication)    │  │ │  │  (Async Replication)    │  │
 │  └─────────────────────────┘  │ │  └─────────────────────────┘  │
 │  ┌─────────────────────────┐  │ │  ┌─────────────────────────┐  │
+│  │  Velero (optional)      │  │ │  │  Velero (optional)      │  │
+│  │  (Kube Object Protect.) │  │ │  │  (Kube Object Protect.) │  │
+│  └─────────────────────────┘  │ │  └─────────────────────────┘  │
+│  ┌─────────────────────────┐  │ │  ┌─────────────────────────┐  │
 │  │  Longhorn CSI           │  │ │  │  Longhorn CSI           │  │
 │  │  (Storage)              │  │ │  │  (Storage)              │  │
 │  └─────────────────────────┘  │ │  └─────────────────────────┘  │
@@ -155,6 +159,22 @@ VolSync provides asynchronous volume replication using rsync-based or Restic-bas
 |-----|-------------|
 | **ReplicationSource** | Defines source PVC and sync schedule (created on primary cluster) |
 | **ReplicationDestination** | Defines where to receive replicated data (created on secondary cluster) |
+
+### Velero (Optional)
+
+**Namespace:** `velero`
+
+Velero provides Kubernetes object protection (kube object protection). When enabled, Ramen uses Velero to capture and restore application resources (Deployments, ConfigMaps, Secrets, etc.) during failover and relocate operations. Without Velero, only PVC data is replicated.
+
+| Component | Description |
+|-----------|-------------|
+| **velero server** | Manages backup and restore operations using a BackupStorageLocation (S3) |
+| **velero-plugin-for-aws** | S3-compatible storage plugin |
+
+Velero requires:
+- An S3 bucket (e.g., `velero` in MinIO)
+- S3 credentials (`vs3-secret`) — automatically propagated by the OTS Velero secret controller
+- The Recipe CRD installed on managed clusters (used by Ramen to coordinate resource capture order)
 
 ### Longhorn CSI (Harvester)
 
@@ -729,6 +749,10 @@ SettingUpVolSyncDest  (reverse replication)
 | VolumeReplicationClass | CSI Addons | ramen-dr-cluster-operator |
 | NetworkFence | CSI Addons | ramen-dr-cluster-operator |
 | NetworkFenceClass | CSI Addons | ramen-dr-cluster-operator |
+| Recipe | Ramen | ramen-dr-cluster-operator (kube object protection) |
+| Backup | Velero | velero (optional, for kube object protection) |
+| Restore | Velero | velero (optional, for kube object protection) |
+| BackupStorageLocation | Velero | velero (optional, for kube object protection) |
 
 ---
 
