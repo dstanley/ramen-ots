@@ -27,6 +27,10 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch", "update"]
+  # ConfigMaps - read Ramen hub operator config for Velero secret propagation
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
   # DRPolicy - read target clusters for secret propagation
   - apiGroups: ["ramendr.openshift.io"]
     resources: ["drpolicies"]

@@ -102,6 +102,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register Velero Secret controller
+	if err := setupVeleroSecretController(mgr, log); err != nil {
+		log.Error(err, "unable to create Velero Secret controller")
+		os.Exit(1)
+	}
+
 	// Register Fleet PlacementDecision controller (optional)
 	if enableFleetController {
 		if err := setupFleetPlacementController(mgr, log, fleetLabelKey, fleetNamespace); err != nil {
@@ -155,6 +161,14 @@ func setupSecretPropagatorController(mgr ctrl.Manager, log logr.Logger) error {
 	reconciler := &controller.SecretPropagatorReconciler{
 		Client: mgr.GetClient(),
 		Log:    log.WithName("secretpropagator"),
+	}
+	return reconciler.SetupWithManager(mgr)
+}
+
+func setupVeleroSecretController(mgr ctrl.Manager, log logr.Logger) error {
+	reconciler := &controller.VeleroSecretReconciler{
+		Client: mgr.GetClient(),
+		Log:    log.WithName("velero-secret"),
 	}
 	return reconciler.SetupWithManager(mgr)
 }

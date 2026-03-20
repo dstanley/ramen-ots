@@ -7,11 +7,16 @@
 package controller
 
 import (
+	"context"
+	"fmt"
 	"time"
 
+	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -153,4 +158,40 @@ func (m *ManagedClusterViewList) DeepCopyInto(out *ManagedClusterViewList) {
 			m.Items[i].DeepCopyInto(&out.Items[i])
 		}
 	}
+}
+
+// getDRPolicyClusters reads all DRPolicy resources and returns the unique set
+// of cluster names. Uses unstructured access to avoid importing Ramen API types.
+func getDRPolicyClusters(ctx context.Context, c client.Client, log logr.Logger) ([]string, error) {
+	drPolicies := &unstructured.UnstructuredList{}
+	drPolicies.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "ramendr.openshift.io",
+		Version: "v1alpha1",
+		Kind:    "DRPolicyList",
+	})
+
+	if err := c.List(ctx, drPolicies); err != nil {
+		return nil, fmt.Errorf("listing DRPolicies: %w", err)
+	}
+
+	clusterSet := make(map[string]bool)
+
+	for _, dp := range drPolicies.Items {
+		clusters, found, err := unstructured.NestedStringSlice(dp.Object, "spec", "drClusters")
+		if err != nil || !found {
+			log.V(1).Info("DRPolicy missing drClusters", "name", dp.GetName())
+			continue
+		}
+
+		for _, c := range clusters {
+			clusterSet[c] = true
+		}
+	}
+
+	result := make([]string, 0, len(clusterSet))
+	for c := range clusterSet {
+		result = append(result, c)
+	}
+
+	return result, nil
 }
